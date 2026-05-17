@@ -9,7 +9,7 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     url = update.message.text
 
-    await update.message.reply_text("چاوەڕوانبە......")
+    await update.message.reply_text("ببورە، ئەم ڤیدیۆیە ناتوانرێت دابەزێنرێت. تکایە لینکی public بنێرە.")
 
     ydl_opts = {
         'format': 'best',
