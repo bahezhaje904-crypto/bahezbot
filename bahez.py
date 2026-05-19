@@ -20,13 +20,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
 
-    await update.message.reply_text("چاوەڕوانبە ......")
+    await update.message.reply_text("چاوەڕوانبە.....")
 
-ydl_opts = {
-    "outtmpl": "downloads/%(title)s.%(ext)s",
-    "quiet": True,
-    "cookiefile": "cookies.txt"
-}
+    ydl_opts = {
+        "outtmpl": "downloads/%(title)s.%(ext)s",
+        "quiet": True,
+        "cookiefile": "cookies.txt"
+    }
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -39,7 +40,7 @@ ydl_opts = {
 
     except Exception:
         await update.message.reply_text(
-            "ببورە، ئەم ڤیدیۆیە ناتوانرێت دابەزێنرێت. تکایە لینکی public بنێرە."
+            "ببوره، ئەم ڤیدیۆیە ناتوانرێت دابەزێندرێت."
         )
 
 app = ApplicationBuilder().token(TOKEN).build()
