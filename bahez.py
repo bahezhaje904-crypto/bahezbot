@@ -5,6 +5,11 @@ import os
 
 TOKEN = os.getenv("TOKEN")
 
+# create downloads folder
+if not os.path.exists("downloads"):
+    os.makedirs("downloads")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "سڵاو 👋\n\n"
@@ -17,6 +22,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Facebook Public"
     )
 
+
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
 
@@ -25,7 +31,9 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ydl_opts = {
         "outtmpl": "downloads/%(title)s.%(ext)s",
         "quiet": True,
-        "cookiefile": "cookies.txt"
+        "cookiefile": "cookies.txt",
+        "format": "mp4",
+        "noplaylist": True
     }
 
     try:
@@ -38,10 +46,11 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         os.remove(filename)
 
-    except Exception:
+    except Exception as e:
         await update.message.reply_text(
-            "ببوره، ئەم ڤیدیۆیە ناتوانرێت دابەزێندرێت."
+            f"ببوره، ئەم ڤیدیۆیە ناتوانرێت دابەزێندرێت.\n\n{e}"
         )
+
 
 app = ApplicationBuilder().token(TOKEN).build()
 
