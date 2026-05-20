@@ -32,7 +32,7 @@ ydl_opts = {
     "outtmpl": "downloads/%(id)s.%(ext)s",
     "quiet": True,
     "cookiefile": "cookies.txt",
-    "format": "mp4",
+    "format": "best[ext=mp4]/best",
 }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
