@@ -9,9 +9,7 @@ TOKEN = os.getenv("TOKEN")
 os.makedirs("downloads", exist_ok=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send TikTok / Instagram / Facebook / YouTube link 🎬"
-    )
+    await update.message.reply_text("Send TikTok / Instagram / Facebook / YouTube link 🎬")
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -24,13 +22,14 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = urls[0]
     await update.message.reply_text("Downloading... ⏳")
 
-ydl_opts = {
-    "format": "best[ext=mp4]/best",
-    "outtmpl": "downloads/%(id)s.%(ext)s",
-    "quiet": True,
-    "noplaylist": True,
-    "cookiefile": "cookies.txt",
-}
+    ydl_opts = {
+        "format": "best[ext=mp4]/best",
+        "outtmpl": "downloads/%(id)s.%(ext)s",
+        "quiet": True,
+        "noplaylist": True,
+        "cookiefile": "cookies.txt",
+    }
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
