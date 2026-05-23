@@ -4,7 +4,7 @@ import yt_dlp
 import os
 import re
 
-TOKEN = os.getenv("8795608533:AAGOAbtPFnNF954XBxsImmVAEYCm_t9SCIc")
+TOKEN = os.getenv("TOKEN")
 
 os.makedirs("downloads", exist_ok=True)
 
