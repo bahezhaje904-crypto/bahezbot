@@ -2,59 +2,52 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
 import os
+import re
 
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("8795608533:AAGOAbtPFnNF954XBxsImmVAEYCm_t9SCIc")
 
-# create downloads folder
-if not os.path.exists("downloads"):
-    os.makedirs("downloads")
-
+os.makedirs("downloads", exist_ok=True)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "سڵاو 👋\n\n"
-        "بەخێربێیت بۆ Bahez Video Downloader 🚀\n\n"
-        "لینکی ڤیدیۆ بنێرە، من دایدەبەزێنم بۆت.\n\n"
-        "پشتگیری دەکات:\n"
-        "• TikTok\n"
-        "• YouTube\n"
-        "• Instagram Public\n"
-        "• Facebook Public"
+        "Send TikTok / Instagram / Facebook / YouTube link 🎬"
     )
 
-
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text
+    text = update.message.text
+    urls = re.findall(r'https?://[^\s]+', text)
 
-    await update.message.reply_text("چاوەڕوانبە.....")
+    if not urls:
+        await update.message.reply_text("Please send a valid video link.")
+        return
 
-ydl_opts = {
-    "outtmpl": "downloads/%(id)s.%(ext)s",
-    "quiet": True,
-    "cookiefile": "cookies.txt",
-    "format": "best[ext=mp4]/best",
-}
+    url = urls[0]
+    await update.message.reply_text("Downloading... ⏳")
+
+    ydl_opts = {
+        "format": "best[ext=mp4]/best",
+        "outtmpl": "downloads/%(id)s.%(ext)s",
+        "quiet": True,
+        "noplaylist": True,
+    }
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
+            file_path = ydl.prepare_filename(info)
 
-        with open(filename, "rb") as video:
+        with open(file_path, "rb") as video:
             await update.message.reply_video(video=video)
 
-        os.remove(filename)
+        os.remove(file_path)
 
     except Exception as e:
-        await update.message.reply_text(
-            f"ببوره، ئەم ڤیدیۆیە ناتوانرێت دابەزێندرێت.\n\n{e}"
-        )
-
+        await update.message.reply_text(f"Error:\n{e}")
 
 app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
 
-print("Bahez Bot is running...")
-
+print("Bot running...")
 app.run_polling()
