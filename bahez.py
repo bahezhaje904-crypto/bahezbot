@@ -302,6 +302,34 @@ def is_youtube_url(url):
     return any(domain in url for domain in youtube_domains)
 
 
+def has_youtube_cookies():
+    if not os.path.exists("cookies.txt"):
+        return False
+
+    with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as cookies_file:
+        cookies_text = cookies_file.read().lower()
+
+    return "youtube.com" in cookies_text or "google.com" in cookies_text
+
+
+def youtube_cookie_error(error):
+    error_text = str(error).lower()
+    return (
+        "sign in to confirm" in error_text
+        or "not a bot" in error_text
+        or "use --cookies" in error_text
+        or "cookies-from-browser" in error_text
+    )
+
+
+def youtube_cookie_message():
+    return (
+        "YouTube is asking the server to sign in before downloading this video.\n\n"
+        "Fix: export fresh YouTube cookies from your browser and replace cookies.txt, "
+        "then redeploy/restart the bot."
+    )
+
+
 def ydl_options(url):
     options = {
         "format": "best[ext=mp4]/best",
@@ -386,6 +414,10 @@ async def send_download(message, url):
     preserve_video_scale = is_facebook_url(url)
     await message.reply_text("Downloading...")
 
+    if is_youtube_url(url) and not has_youtube_cookies():
+        await message.reply_text(youtube_cookie_message())
+        return
+
     ydl_opts = ydl_options(url)
 
     try:
@@ -420,6 +452,10 @@ async def send_download(message, url):
             except Exception as fallback_error:
                 await message.reply_text(f"Error:\n{fallback_error}")
                 return
+
+        if is_youtube_url(url) and youtube_cookie_error(e):
+            await message.reply_text(youtube_cookie_message())
+            return
 
         await message.reply_text(f"Error:\n{e}")
     finally:
