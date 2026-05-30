@@ -215,13 +215,17 @@ def downloaded_files(before_files, prepared_file_path):
     return sorted(new_files, key=os.path.getmtime)
 
 
-async def send_file(message, file_path):
+async def send_file(message, file_path, preserve_video_scale=False):
     extension = os.path.splitext(file_path)[1].lower()
 
     with open(file_path, "rb") as media:
         if extension in IMAGE_EXTENSIONS:
             await message.reply_photo(photo=media)
         elif extension in VIDEO_EXTENSIONS:
+            if preserve_video_scale:
+                await message.reply_document(document=media)
+                return
+
             width, height = video_dimensions(file_path)
             video_options = {"video": media, "supports_streaming": True}
 
@@ -288,6 +292,11 @@ def is_tiktok_url(url):
     return "tiktok.com" in url or "vt.tiktok.com" in url
 
 
+def is_facebook_url(url):
+    facebook_domains = ("facebook.com", "fb.watch", "fb.com", "m.facebook.com")
+    return any(domain in url for domain in facebook_domains)
+
+
 def download_tiktok_photos(url):
     response = requests.get(
         TIKWM_API_URL,
@@ -331,6 +340,7 @@ def download_tiktok_photos(url):
 async def send_download(message, url):
     files_to_send = []
     cleanup_files = []
+    preserve_video_scale = is_facebook_url(url)
     await message.reply_text("Downloading...")
 
     ydl_opts = {
@@ -359,7 +369,7 @@ async def send_download(message, url):
             return
 
         for file_path in files_to_send:
-            await send_file(message, file_path)
+            await send_file(message, file_path, preserve_video_scale=preserve_video_scale)
 
     except Exception as e:
         if is_tiktok_url(url):
