@@ -387,11 +387,17 @@ def ydl_options(url):
         if shutil.which("ffmpeg"):
             options["format"] = (
                 "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-                "best[ext=mp4][vcodec!=none][acodec!=none]/best"
+                "bestvideo+bestaudio/"
+                "best[ext=mp4][vcodec!=none][acodec!=none]/"
+                "best"
             )
             options["merge_output_format"] = "mp4"
         else:
-            options["format"] = "best[ext=mp4][vcodec!=none][acodec!=none]/best"
+            options["format"] = (
+                "best[ext=mp4][vcodec!=none][acodec!=none]/"
+                "best[vcodec!=none][acodec!=none]/"
+                "best"
+            )
 
         options["extractor_args"] = {
             "youtube": {
