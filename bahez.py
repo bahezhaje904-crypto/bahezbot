@@ -21,6 +21,8 @@ if not TOKEN:
 
 DB_PATH = "bot.db"
 SHARE_INTERVAL = timedelta(days=5)
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
 os.makedirs("downloads", exist_ok=True)
 
@@ -146,7 +148,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user, referrer_id)
 
     await update.message.reply_text(
-        "Send a TikTok, Instagram, Facebook, or YouTube link.\nUse /top to see the top inviters."
+        "Send a TikTok, Instagram, Facebook, or YouTube photo/video link.\n"
+        "Use /top to see the top inviters."
     )
 
 
@@ -183,7 +186,7 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     urls = re.findall(r"https?://[^\s]+", text)
 
     if not urls:
-        await update.message.reply_text("Please send a valid video link.")
+        await update.message.reply_text("Please send a valid photo or video link.")
         return
 
     url = urls[0]
@@ -191,11 +194,36 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_share_prompt(update, context, url)
         return
 
-    await send_video(update.message, url)
+    await send_download(update.message, url)
 
 
-async def send_video(message, url):
-    file_path = None
+def downloaded_files(before_files, prepared_file_path):
+    after_files = {
+        os.path.join("downloads", file_name)
+        for file_name in os.listdir("downloads")
+    }
+    new_files = after_files - before_files
+
+    if prepared_file_path and os.path.exists(prepared_file_path):
+        new_files.add(prepared_file_path)
+
+    return sorted(new_files, key=os.path.getmtime)
+
+
+async def send_file(message, file_path):
+    extension = os.path.splitext(file_path)[1].lower()
+
+    with open(file_path, "rb") as media:
+        if extension in IMAGE_EXTENSIONS:
+            await message.reply_photo(photo=media)
+        elif extension in VIDEO_EXTENSIONS:
+            await message.reply_video(video=media)
+        else:
+            await message.reply_document(document=media)
+
+
+async def send_download(message, url):
+    files_to_send = []
     await message.reply_text("Downloading...")
 
     ydl_opts = {
@@ -207,17 +235,32 @@ async def send_video(message, url):
     }
 
     try:
+        before_files = {
+            os.path.join("downloads", file_name)
+            for file_name in os.listdir("downloads")
+        }
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             file_path = ydl.prepare_filename(info)
 
-        with open(file_path, "rb") as video:
-            await message.reply_video(video=video)
+        files_to_send = downloaded_files(before_files, file_path)
+
+        if not files_to_send:
+            await message.reply_text("I could not find a downloaded photo or video for this link.")
+            return
+
+        for file_path in files_to_send:
+            await send_file(message, file_path)
 
     except Exception as e:
         await message.reply_text(f"Error:\n{e}")
     finally:
-        if file_path and os.path.exists(file_path):
+        for file_path in files_to_send:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+        if "file_path" in locals() and os.path.exists(file_path):
             os.remove(file_path)
 
 
@@ -233,7 +276,7 @@ async def share_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.message.reply_text("Thanks for sharing. Your download will start now.")
-    await send_video(query.message, url)
+    await send_download(query.message, url)
 
 
 init_db()
