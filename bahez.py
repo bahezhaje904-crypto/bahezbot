@@ -297,6 +297,49 @@ def is_facebook_url(url):
     return any(domain in url for domain in facebook_domains)
 
 
+def is_youtube_url(url):
+    youtube_domains = ("youtube.com", "youtu.be", "youtube-nocookie.com")
+    return any(domain in url for domain in youtube_domains)
+
+
+def ydl_options(url):
+    options = {
+        "format": "best[ext=mp4]/best",
+        "outtmpl": "downloads/%(id)s.%(ext)s",
+        "quiet": True,
+        "noplaylist": True,
+        "cookiefile": "cookies.txt",
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 3,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            )
+        },
+    }
+
+    if is_youtube_url(url):
+        if shutil.which("ffmpeg"):
+            options["format"] = (
+                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+                "best[ext=mp4][vcodec!=none][acodec!=none]/best"
+            )
+            options["merge_output_format"] = "mp4"
+        else:
+            options["format"] = "best[ext=mp4][vcodec!=none][acodec!=none]/best"
+
+        options["extractor_args"] = {
+            "youtube": {
+                "player_client": ["default", "ios", "web_safari", "mweb"],
+            }
+        }
+
+    return options
+
+
 def download_tiktok_photos(url):
     response = requests.get(
         TIKWM_API_URL,
@@ -343,13 +386,7 @@ async def send_download(message, url):
     preserve_video_scale = is_facebook_url(url)
     await message.reply_text("Downloading...")
 
-    ydl_opts = {
-        "format": "best[ext=mp4]/best",
-        "outtmpl": "downloads/%(id)s.%(ext)s",
-        "quiet": True,
-        "noplaylist": True,
-        "cookiefile": "cookies.txt",
-    }
+    ydl_opts = ydl_options(url)
 
     try:
         before_files = {
