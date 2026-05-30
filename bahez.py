@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from urllib.parse import quote
+import base64
 import sqlite3
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -28,8 +29,35 @@ SHARE_INTERVAL = timedelta(days=5)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 TIKWM_API_URL = "https://www.tikwm.com/api/"
+DEFAULT_COOKIES_FILE = "cookies.txt"
+RUNTIME_COOKIES_FILE = os.path.join("downloads", "youtube_cookies.txt")
 
 os.makedirs("downloads", exist_ok=True)
+
+
+def prepare_cookies_file():
+    cookies_text = os.getenv("YOUTUBE_COOKIES_TEXT")
+    cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64")
+
+    if cookies_b64:
+        try:
+            cookies_text = base64.b64decode(cookies_b64).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            cookies_text = None
+
+    if cookies_text:
+        with open(RUNTIME_COOKIES_FILE, "w", encoding="utf-8") as cookies_file:
+            cookies_file.write(cookies_text)
+        return RUNTIME_COOKIES_FILE
+
+    custom_cookies_file = os.getenv("COOKIES_FILE")
+    if custom_cookies_file:
+        return custom_cookies_file
+
+    return DEFAULT_COOKIES_FILE
+
+
+COOKIES_FILE = prepare_cookies_file()
 
 
 def db_connect():
@@ -303,10 +331,10 @@ def is_youtube_url(url):
 
 
 def has_youtube_cookies():
-    if not os.path.exists("cookies.txt"):
+    if not COOKIES_FILE or not os.path.exists(COOKIES_FILE):
         return False
 
-    with open("cookies.txt", "r", encoding="utf-8", errors="ignore") as cookies_file:
+    with open(COOKIES_FILE, "r", encoding="utf-8", errors="ignore") as cookies_file:
         cookies_text = cookies_file.read().lower()
 
     return "youtube.com" in cookies_text or "google.com" in cookies_text
@@ -325,8 +353,8 @@ def youtube_cookie_error(error):
 def youtube_cookie_message():
     return (
         "YouTube is asking the server to sign in before downloading this video.\n\n"
-        "Fix: export fresh YouTube cookies from your browser and replace cookies.txt, "
-        "then redeploy/restart the bot."
+        "Fix: export fresh YouTube cookies from your browser and set them in "
+        "YOUTUBE_COOKIES_TEXT or YOUTUBE_COOKIES_B64, then restart the bot."
     )
 
 
@@ -336,7 +364,6 @@ def ydl_options(url):
         "outtmpl": "downloads/%(id)s.%(ext)s",
         "quiet": True,
         "noplaylist": True,
-        "cookiefile": "cookies.txt",
         "retries": 3,
         "fragment_retries": 3,
         "extractor_retries": 3,
@@ -348,6 +375,9 @@ def ydl_options(url):
             )
         },
     }
+
+    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+        options["cookiefile"] = COOKIES_FILE
 
     if is_youtube_url(url):
         if shutil.which("ffmpeg"):
