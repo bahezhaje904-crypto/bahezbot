@@ -17,6 +17,7 @@ import re
 import requests
 import shutil
 import subprocess
+import json
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
@@ -221,48 +222,66 @@ async def send_file(message, file_path):
         if extension in IMAGE_EXTENSIONS:
             await message.reply_photo(photo=media)
         elif extension in VIDEO_EXTENSIONS:
-            await message.reply_video(video=media)
+            width, height = video_dimensions(file_path)
+            video_options = {"video": media, "supports_streaming": True}
+
+            if width and height:
+                video_options["width"] = width
+                video_options["height"] = height
+
+            await message.reply_video(**video_options)
         else:
             await message.reply_document(document=media)
 
 
-def normalize_video(file_path):
+def video_dimensions(file_path):
     extension = os.path.splitext(file_path)[1].lower()
-    if extension not in VIDEO_EXTENSIONS or not shutil.which("ffmpeg"):
-        return file_path
-
-    base_path = os.path.splitext(file_path)[0]
-    normalized_path = f"{base_path}_normalized.mp4"
+    if extension not in VIDEO_EXTENSIONS or not shutil.which("ffprobe"):
+        return None, None
 
     command = [
-        "ffmpeg",
-        "-y",
-        "-i",
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,sample_aspect_ratio:stream_tags=rotate",
+        "-of",
+        "json",
         file_path,
-        "-vf",
-        "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
-        normalized_path,
     ]
 
     try:
-        subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
-    except (subprocess.SubprocessError, OSError):
-        return file_path
+        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=20)
+        streams = json.loads(result.stdout).get("streams") or []
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return None, None
 
-    if os.path.exists(normalized_path) and os.path.getsize(normalized_path) > 0:
-        return normalized_path
+    if not streams:
+        return None, None
 
-    return file_path
+    stream = streams[0]
+    width = stream.get("width")
+    height = stream.get("height")
+
+    if not width or not height:
+        return None, None
+
+    sample_aspect_ratio = stream.get("sample_aspect_ratio")
+    if sample_aspect_ratio and sample_aspect_ratio != "1:1":
+        try:
+            sar_width, sar_height = [int(value) for value in sample_aspect_ratio.split(":", 1)]
+            if sar_width > 0 and sar_height > 0:
+                width = round(width * sar_width / sar_height)
+        except ValueError:
+            pass
+
+    rotate = (stream.get("tags") or {}).get("rotate")
+    if rotate in {"90", "270", "-90"}:
+        width, height = height, width
+
+    return width, height
 
 
 def is_tiktok_url(url):
@@ -339,10 +358,7 @@ async def send_download(message, url):
             await message.reply_text("I could not find a downloaded photo or video for this link.")
             return
 
-        normalized_files = [normalize_video(file_path) for file_path in files_to_send]
-        cleanup_files.extend(normalized_files)
-
-        for file_path in normalized_files:
+        for file_path in files_to_send:
             await send_file(message, file_path)
 
     except Exception as e:
