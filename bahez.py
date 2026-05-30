@@ -1,9 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 import base64
 import sqlite3
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import Conflict
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -81,7 +82,7 @@ def init_db():
 
 
 def register_user(user, referrer_id=None):
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(UTC).isoformat()
 
     with db_connect() as conn:
         existing = conn.execute(
@@ -138,14 +139,17 @@ def should_share(user_id):
         return False
 
     last_shared_at = datetime.fromisoformat(row[0])
-    return datetime.utcnow() - last_shared_at >= SHARE_INTERVAL
+    if last_shared_at.tzinfo is None:
+        last_shared_at = last_shared_at.replace(tzinfo=UTC)
+
+    return datetime.now(UTC) - last_shared_at >= SHARE_INTERVAL
 
 
 def mark_shared(user_id):
     with db_connect() as conn:
         conn.execute(
             "UPDATE users SET last_shared_at = ? WHERE user_id = ?",
-            (datetime.utcnow().isoformat(), user_id),
+            (datetime.now(UTC).isoformat(), user_id),
         )
 
 
@@ -512,6 +516,14 @@ async def share_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_download(query.message, url)
 
 
+async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    if isinstance(context.error, Conflict):
+        print("Telegram conflict: another bot instance is polling with the same TOKEN.")
+        return
+
+    print(f"Unhandled bot error: {context.error}")
+
+
 init_db()
 
 app = ApplicationBuilder().token(TOKEN).build()
@@ -520,6 +532,7 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("top", top))
 app.add_handler(CallbackQueryHandler(share_done, pattern="^share_done$"))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
+app.add_error_handler(handle_error)
 
 print("Bot running...")
-app.run_polling()
+app.run_polling(drop_pending_updates=True)
