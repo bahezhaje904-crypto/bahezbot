@@ -354,6 +354,10 @@ def youtube_cookie_error(error):
     )
 
 
+def youtube_format_error(error):
+    return "requested format is not available" in str(error).lower()
+
+
 def youtube_cookie_message():
     return (
         "YouTube is asking the server to sign in before downloading this video.\n\n"
@@ -384,21 +388,7 @@ def ydl_options(url):
         options["cookiefile"] = COOKIES_FILE
 
     if is_youtube_url(url):
-        if shutil.which("ffmpeg"):
-            options["format"] = (
-                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-                "bestvideo+bestaudio/"
-                "best[ext=mp4][vcodec!=none][acodec!=none]/"
-                "best"
-            )
-            options["merge_output_format"] = "mp4"
-        else:
-            options["format"] = (
-                "best[ext=mp4][vcodec!=none][acodec!=none]/"
-                "best[vcodec!=none][acodec!=none]/"
-                "best"
-            )
-
+        options["format"] = "best"
         options["extractor_args"] = {
             "youtube": {
                 "player_client": ["default", "ios", "web_safari", "mweb"],
@@ -406,6 +396,12 @@ def ydl_options(url):
         }
 
     return options
+
+
+def download_with_yt_dlp(url, options):
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=True)
+        return ydl.prepare_filename(info)
 
 
 def download_tiktok_photos(url):
@@ -466,9 +462,17 @@ async def send_download(message, url):
             for file_name in os.listdir("downloads")
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_path = ydl.prepare_filename(info)
+        try:
+            file_path = download_with_yt_dlp(url, ydl_opts)
+        except Exception as e:
+            if not is_youtube_url(url) or not youtube_format_error(e):
+                raise
+
+            fallback_opts = ydl_options(url)
+            fallback_opts["format"] = None
+            fallback_opts.pop("merge_output_format", None)
+            fallback_opts.pop("extractor_args", None)
+            file_path = download_with_yt_dlp(url, fallback_opts)
 
         files_to_send = downloaded_files(before_files, file_path)
         cleanup_files = list(files_to_send)
