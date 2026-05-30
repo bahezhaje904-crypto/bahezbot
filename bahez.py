@@ -14,6 +14,7 @@ from telegram.ext import (
 import yt_dlp
 import os
 import re
+import requests
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
@@ -23,6 +24,7 @@ DB_PATH = "bot.db"
 SHARE_INTERVAL = timedelta(days=5)
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+TIKWM_API_URL = "https://www.tikwm.com/api/"
 
 os.makedirs("downloads", exist_ok=True)
 
@@ -222,6 +224,50 @@ async def send_file(message, file_path):
             await message.reply_document(document=media)
 
 
+def is_tiktok_url(url):
+    return "tiktok.com" in url or "vt.tiktok.com" in url
+
+
+def download_tiktok_photos(url):
+    response = requests.get(
+        TIKWM_API_URL,
+        params={"url": url},
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    data = payload.get("data") or {}
+    image_urls = data.get("images") or []
+
+    if not image_urls:
+        return []
+
+    file_paths = []
+    item_id = data.get("id") or "tiktok_photo"
+
+    for index, image_url in enumerate(image_urls, start=1):
+        if image_url.startswith("//"):
+            image_url = f"https:{image_url}"
+        elif image_url.startswith("/"):
+            image_url = f"https://www.tikwm.com{image_url}"
+
+        image_response = requests.get(
+            image_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=30,
+        )
+        image_response.raise_for_status()
+
+        file_path = os.path.join("downloads", f"{item_id}_{index}.jpg")
+        with open(file_path, "wb") as image_file:
+            image_file.write(image_response.content)
+        file_paths.append(file_path)
+
+    return file_paths
+
+
 async def send_download(message, url):
     files_to_send = []
     await message.reply_text("Downloading...")
@@ -254,6 +300,17 @@ async def send_download(message, url):
             await send_file(message, file_path)
 
     except Exception as e:
+        if is_tiktok_url(url):
+            try:
+                files_to_send = download_tiktok_photos(url)
+                if files_to_send:
+                    for file_path in files_to_send:
+                        await send_file(message, file_path)
+                    return
+            except Exception as fallback_error:
+                await message.reply_text(f"Error:\n{fallback_error}")
+                return
+
         await message.reply_text(f"Error:\n{e}")
     finally:
         for file_path in files_to_send:
