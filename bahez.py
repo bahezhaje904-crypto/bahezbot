@@ -15,6 +15,8 @@ import yt_dlp
 import os
 import re
 import requests
+import shutil
+import subprocess
 
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
@@ -224,6 +226,45 @@ async def send_file(message, file_path):
             await message.reply_document(document=media)
 
 
+def normalize_video(file_path):
+    extension = os.path.splitext(file_path)[1].lower()
+    if extension not in VIDEO_EXTENSIONS or not shutil.which("ffmpeg"):
+        return file_path
+
+    base_path = os.path.splitext(file_path)[0]
+    normalized_path = f"{base_path}_normalized.mp4"
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        file_path,
+        "-vf",
+        "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        normalized_path,
+    ]
+
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
+    except (subprocess.SubprocessError, OSError):
+        return file_path
+
+    if os.path.exists(normalized_path) and os.path.getsize(normalized_path) > 0:
+        return normalized_path
+
+    return file_path
+
+
 def is_tiktok_url(url):
     return "tiktok.com" in url or "vt.tiktok.com" in url
 
@@ -270,6 +311,7 @@ def download_tiktok_photos(url):
 
 async def send_download(message, url):
     files_to_send = []
+    cleanup_files = []
     await message.reply_text("Downloading...")
 
     ydl_opts = {
@@ -291,18 +333,23 @@ async def send_download(message, url):
             file_path = ydl.prepare_filename(info)
 
         files_to_send = downloaded_files(before_files, file_path)
+        cleanup_files = list(files_to_send)
 
         if not files_to_send:
             await message.reply_text("I could not find a downloaded photo or video for this link.")
             return
 
-        for file_path in files_to_send:
+        normalized_files = [normalize_video(file_path) for file_path in files_to_send]
+        cleanup_files.extend(normalized_files)
+
+        for file_path in normalized_files:
             await send_file(message, file_path)
 
     except Exception as e:
         if is_tiktok_url(url):
             try:
                 files_to_send = download_tiktok_photos(url)
+                cleanup_files = list(files_to_send)
                 if files_to_send:
                     for file_path in files_to_send:
                         await send_file(message, file_path)
@@ -313,7 +360,7 @@ async def send_download(message, url):
 
         await message.reply_text(f"Error:\n{e}")
     finally:
-        for file_path in files_to_send:
+        for file_path in set(cleanup_files):
             if os.path.exists(file_path):
                 os.remove(file_path)
 
