@@ -26,11 +26,10 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("Missing TOKEN environment variable. Add TOKEN in Railway Variables.")
 
-# Add your Telegram numeric ID in Railway Variables as OWNER_ID for admin commands.
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()  # Example: @YourChannel
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
 SPONSOR_TEXT = os.getenv("SPONSOR_TEXT", "").strip()
-ERROR_GROUP_ID = os.getenv("ERROR_GROUP_ID", "").strip()  # Example: -1001234567890 or @your_error_group
+ERROR_GROUP_ID = os.getenv("ERROR_GROUP_ID", "").strip()
 
 DB_PATH = "bot.db"
 DOWNLOAD_DIR = "downloads"
@@ -610,6 +609,7 @@ def instagram_cookie_message():
         "If it still fails, export fresh Instagram cookies while logged in and replace the old value."
     )
 
+
 def youtube_cookie_error(error):
     error_text = str(error).lower()
     return any(
@@ -648,7 +648,9 @@ def ydl_options(url, kind="video"):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36"
         },
     }
+
     if kind == "mp3":
+        # MP3 conversion needs FFmpeg. If FFmpeg is missing, yt-dlp will return a clean error.
         options.update(
             {
                 "format": "bestaudio/best",
@@ -657,11 +659,14 @@ def ydl_options(url, kind="video"):
         )
     else:
         if is_instagram_url(url):
-            # Prefer the original Instagram Reel stream. This avoids the cropped/zoomed
-            # 1:1 or center-cropped variants that Instagram sometimes exposes.
+            # Fixed:
+            # - no comma after the string, so it is not a tuple
+            # - no merge_output_format, so FFmpeg is not required
+            # - Telegram will show it as a video like before
             options["format"] = "best[ext=mp4]/best"
         else:
             options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
+
     if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
@@ -753,24 +758,12 @@ async def send_file(message, file_path, preserve_video_scale=False):
             return True
 
         if extension in VIDEO_EXTENSIONS:
+            # Fixed: show video like before instead of sending Instagram as a document.
             width, height = video_dimensions(file_path)
-
-            # Portrait videos like Instagram Reels, TikTok, and Facebook Reels can be
-            # resized/cropped by Telegram when sent as normal videos. Sending them as
-            # documents preserves the original size, quality, and aspect ratio.
-            is_portrait = bool(width and height and height > width)
-            if preserve_video_scale or is_portrait:
-                await message.reply_document(
-                    document=media,
-                    filename=os.path.basename(file_path),
-                )
-                return True
-
             video_options = {"video": media, "supports_streaming": True}
             if width and height:
                 video_options["width"] = width
                 video_options["height"] = height
-
             await message.reply_video(**video_options)
             return True
 
@@ -826,8 +819,8 @@ async def send_clean_error(message):
 async def send_download(message, url, context=None, kind="video"):
     files_to_send = []
     cleanup_files = []
-    # Send Instagram and Facebook as documents to preserve the original aspect ratio.
-    preserve_video_scale = is_facebook_url(url) or is_instagram_url(url)
+    # Fixed: do not force Instagram/Facebook as document. Show video like before.
+    preserve_video_scale = False
     url = normalize_url(url)
     await message.reply_text("Downloading... ⏳")
     try:
@@ -852,12 +845,20 @@ async def send_download(message, url, context=None, kind="video"):
                         sent_any = await send_file(message, path) or sent_any
                     return sent_any
             except Exception as fallback_error:
-                await message.reply_text(f"TikTok error:\n{fallback_error}")
+                await report_download_error(context, message, url, fallback_error, kind)
+                await send_clean_error(message)
                 return False
+
+        await report_download_error(context, message, url, error, kind)
+
+        if is_instagram_url(url) and instagram_cookie_error(error):
+            await send_clean_error(message)
+            return False
         if is_youtube_url(url) and youtube_cookie_error(error):
             await message.reply_text(youtube_cookie_message())
             return False
-        await message.reply_text(f"Error:\n{error}")
+
+        await send_clean_error(message)
         return False
     finally:
         for path in set(cleanup_files):
@@ -927,7 +928,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
     app.add_error_handler(handle_error)
-    print("BahezBot v3 running...")
+    print("BahezBot v3 fixed running...")
     app.run_polling(drop_pending_updates=True)
 
 
