@@ -735,26 +735,45 @@ def video_dimensions(file_path):
 async def send_file(message, file_path, preserve_video_scale=False):
     if not os.path.exists(file_path):
         return False
+
     if os.path.getsize(file_path) > MAX_TELEGRAM_SIZE:
         await message.reply_text("The file is bigger than Telegram bot limit. Try a shorter/lower quality video.")
         return False
+
     extension = os.path.splitext(file_path)[1].lower()
+
     with open(file_path, "rb") as media:
         if extension in IMAGE_EXTENSIONS:
             await message.reply_photo(photo=media)
-        elif extension in VIDEO_EXTENSIONS:
-            if preserve_video_scale:
-                await message.reply_document(document=media)
-            else:
-                width, height = video_dimensions(file_path)
-                options = {"video": media, "supports_streaming": True}
-                if width and height:
-                    options["width"] = width
-                    options["height"] = height
-                await message.reply_video(**options)
-        else:
-            await message.reply_document(document=media)
-    return True
+            return True
+
+        if extension in VIDEO_EXTENSIONS:
+            width, height = video_dimensions(file_path)
+
+            # Portrait videos like Instagram Reels, TikTok, and Facebook Reels can be
+            # resized/cropped by Telegram when sent as normal videos. Sending them as
+            # documents preserves the original size, quality, and aspect ratio.
+            is_portrait = bool(width and height and height > width)
+            if preserve_video_scale or is_portrait:
+                await message.reply_document(
+                    document=media,
+                    filename=os.path.basename(file_path),
+                )
+                return True
+
+            video_options = {"video": media, "supports_streaming": True}
+            if width and height:
+                video_options["width"] = width
+                video_options["height"] = height
+
+            await message.reply_video(**video_options)
+            return True
+
+        await message.reply_document(
+            document=media,
+            filename=os.path.basename(file_path),
+        )
+        return True
 
 
 def short_text(value, limit=2500):
