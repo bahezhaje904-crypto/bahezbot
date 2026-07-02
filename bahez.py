@@ -43,6 +43,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 TIKWM_API_URL = "https://www.tikwm.com/api/"
 DEFAULT_COOKIES_FILE = "cookies.txt"
 RUNTIME_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "youtube_cookies.txt")
+RUNTIME_INSTAGRAM_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "instagram_cookies.txt")
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -513,27 +514,61 @@ async def mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_download(update.effective_user.id, url, "mp3")
 
 
-def prepare_cookies_file():
-    cookies_text = os.getenv("YOUTUBE_COOKIES_TEXT")
-    cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64")
+def write_cookies_from_env(text_name, b64_name, runtime_path):
+    cookies_text = os.getenv(text_name)
+    cookies_b64 = os.getenv(b64_name)
+
     if cookies_b64:
         try:
             cookies_text = base64.b64decode(cookies_b64).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
             cookies_text = None
+
     if cookies_text:
-        with open(RUNTIME_COOKIES_FILE, "w", encoding="utf-8") as cookies_file:
+        with open(runtime_path, "w", encoding="utf-8") as cookies_file:
             cookies_file.write(cookies_text)
-        return RUNTIME_COOKIES_FILE
+        return runtime_path
+
+    return None
+
+
+def prepare_cookies_file():
+    youtube_cookie_file = write_cookies_from_env(
+        "YOUTUBE_COOKIES_TEXT",
+        "YOUTUBE_COOKIES_B64",
+        RUNTIME_COOKIES_FILE,
+    )
+    if youtube_cookie_file:
+        return youtube_cookie_file
+
     custom_cookies_file = os.getenv("COOKIES_FILE")
     if custom_cookies_file:
         return custom_cookies_file
+
     if os.path.exists(DEFAULT_COOKIES_FILE):
         return DEFAULT_COOKIES_FILE
+
+    return None
+
+
+def prepare_instagram_cookies_file():
+    instagram_cookie_file = write_cookies_from_env(
+        "INSTAGRAM_COOKIES_TEXT",
+        "INSTAGRAM_COOKIES_B64",
+        RUNTIME_INSTAGRAM_COOKIES_FILE,
+    )
+    if instagram_cookie_file:
+        return instagram_cookie_file
+
+    custom_instagram_file = os.getenv("INSTAGRAM_COOKIES_FILE")
+    if custom_instagram_file:
+        return custom_instagram_file
+
     return None
 
 
 COOKIES_FILE = prepare_cookies_file()
+INSTAGRAM_COOKIES_FILE = prepare_instagram_cookies_file()
 
 
 def is_tiktok_url(url):
@@ -547,6 +582,32 @@ def is_facebook_url(url):
 def is_youtube_url(url):
     return any(domain in url.lower() for domain in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
 
+
+def is_instagram_url(url):
+    return "instagram.com" in url.lower()
+
+
+def instagram_cookie_error(error):
+    error_text = str(error).lower()
+    return any(
+        phrase in error_text
+        for phrase in (
+            "empty media response",
+            "login required",
+            "requested content is not available",
+            "cookies",
+            "authentication",
+            "private",
+        )
+    )
+
+
+def instagram_cookie_message():
+    return (
+        "Instagram did not allow the server to access this Reel.\n\n"
+        "Make sure Railway Variables has INSTAGRAM_COOKIES_TEXT, then Redeploy. "
+        "If it still fails, export fresh Instagram cookies while logged in and replace the old value."
+    )
 
 def youtube_cookie_error(error):
     error_text = str(error).lower()
@@ -595,8 +656,14 @@ def ydl_options(url, kind="video"):
         )
     else:
         options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
+    if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
+        options["cookiefile"] = INSTAGRAM_COOKIES_FILE
+    elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
         options["cookiefile"] = COOKIES_FILE
+
+    if is_instagram_url(url):
+        options["extractor_args"] = {"instagram": {"app_id": ["936619743392459"]}}
+
     if is_youtube_url(url):
         options["extractor_args"] = {"youtube": {"player_client": ["default", "ios", "web_safari", "mweb"]}}
     return options
