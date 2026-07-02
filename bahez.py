@@ -659,7 +659,7 @@ def ydl_options(url, kind="video"):
         if is_instagram_url(url):
             # Prefer the original Instagram Reel stream. This avoids the cropped/zoomed
             # 1:1 or center-cropped variants that Instagram sometimes exposes.
-            options["format"] = "bv*+ba/b"
+            options["format"] = "best[ext=mp4]/best",
             options["merge_output_format"] = "mp4"
         else:
             options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
