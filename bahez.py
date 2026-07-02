@@ -656,7 +656,13 @@ def ydl_options(url, kind="video"):
             }
         )
     else:
-        options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
+        if is_instagram_url(url):
+            # Prefer the original Instagram Reel stream. This avoids the cropped/zoomed
+            # 1:1 or center-cropped variants that Instagram sometimes exposes.
+            options["format"] = "bv*+ba/b"
+            options["merge_output_format"] = "mp4"
+        else:
+            options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
     if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
@@ -821,7 +827,8 @@ async def send_clean_error(message):
 async def send_download(message, url, context=None, kind="video"):
     files_to_send = []
     cleanup_files = []
-    preserve_video_scale = is_facebook_url(url)
+    # Send Instagram and Facebook as documents to preserve the original aspect ratio.
+    preserve_video_scale = is_facebook_url(url) or is_instagram_url(url)
     url = normalize_url(url)
     await message.reply_text("Downloading... ⏳")
     try:
