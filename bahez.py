@@ -30,6 +30,7 @@ if not TOKEN:
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()  # Example: @YourChannel
 SPONSOR_TEXT = os.getenv("SPONSOR_TEXT", "").strip()
+ERROR_GROUP_ID = os.getenv("ERROR_GROUP_ID", "").strip()  # Example: -1001234567890 or @your_error_group
 
 DB_PATH = "bot.db"
 DOWNLOAD_DIR = "downloads"
@@ -485,7 +486,7 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if should_share(update.effective_user.id):
         await send_share_prompt(update, context, url)
         return
-    success = await send_download(update.message, url, kind="video")
+    success = await send_download(update.message, url, context=context, kind="video")
     if success:
         log_download(update.effective_user.id, url, "video")
         if SPONSOR_TEXT:
@@ -509,7 +510,7 @@ async def mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use: /mp3 https://youtube.com/...")
         return
     url = urls[0].strip()
-    success = await send_download(update.message, url, kind="mp3")
+    success = await send_download(update.message, url, context=context, kind="mp3")
     if success:
         log_download(update.effective_user.id, url, "mp3")
 
@@ -756,7 +757,49 @@ async def send_file(message, file_path, preserve_video_scale=False):
     return True
 
 
-async def send_download(message, url, kind="video"):
+def short_text(value, limit=2500):
+    value = str(value)
+    return value if len(value) <= limit else value[:limit] + "..."
+
+
+async def report_download_error(context, message, url, error, kind="video"):
+    if not ERROR_GROUP_ID or context is None:
+        return
+
+    user = getattr(message, "from_user", None)
+    chat = getattr(message, "chat", None)
+    username = f"@{user.username}" if user and user.username else "No username"
+    full_name = user.full_name if user else "Unknown user"
+    user_id = user.id if user else "Unknown"
+    chat_id = chat.id if chat else "Unknown"
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    report = (
+        "🚨 BahezBot Download Error\n\n"
+        f"🕒 Time: {now}\n"
+        f"👤 User: {full_name} ({username})\n"
+        f"🆔 User ID: {user_id}\n"
+        f"💬 Chat ID: {chat_id}\n"
+        f"📱 Platform: {platform_name(url)}\n"
+        f"📦 Type: {kind}\n\n"
+        f"🔗 URL:\n{url}\n\n"
+        f"❌ Error:\n{short_text(error)}"
+    )
+
+    try:
+        await context.bot.send_message(chat_id=ERROR_GROUP_ID, text=report)
+    except Exception as send_error:
+        print(f"Could not send error report to group: {send_error}")
+
+
+async def send_clean_error(message):
+    await message.reply_text(
+        "❌ Sorry, we couldn't download this video.\n"
+        "Please try another public link or try again later."
+    )
+
+
+async def send_download(message, url, context=None, kind="video"):
     files_to_send = []
     cleanup_files = []
     preserve_video_scale = is_facebook_url(url)
@@ -809,7 +852,7 @@ async def share_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Thanks. Send your video link again.")
         return
     await query.message.reply_text("Thanks for sharing. Your download will start now.")
-    success = await send_download(query.message, url)
+    success = await send_download(query.message, url, context=context)
     if success:
         log_download(update.effective_user.id, url, "video")
 
