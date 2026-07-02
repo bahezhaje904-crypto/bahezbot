@@ -650,7 +650,6 @@ def ydl_options(url, kind="video"):
     }
 
     if kind == "mp3":
-        # MP3 conversion needs FFmpeg. If FFmpeg is missing, yt-dlp will return a clean error.
         options.update(
             {
                 "format": "bestaudio/best",
@@ -659,11 +658,8 @@ def ydl_options(url, kind="video"):
         )
     else:
         if is_instagram_url(url):
-            # Fixed:
-            # - no comma after the string, so it is not a tuple
-            # - no merge_output_format, so FFmpeg is not required
-            # - Telegram will show it as a video like before
-            options["format"] = "best[ext=mp4]/best"
+            # Important: single-file MP4 only. This avoids the FFmpeg merge error and keeps Telegram preview.
+            options["format"] = "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best"
         else:
             options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
 
@@ -728,7 +724,18 @@ def video_dimensions(file_path):
         return None, None
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", file_path],
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,sample_aspect_ratio:stream_tags=rotate",
+                "-of",
+                "json",
+                file_path,
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -737,7 +744,29 @@ def video_dimensions(file_path):
         streams = json.loads(result.stdout).get("streams") or []
         if not streams:
             return None, None
-        return streams[0].get("width"), streams[0].get("height")
+
+        stream = streams[0]
+        width = stream.get("width")
+        height = stream.get("height")
+        if not width or not height:
+            return None, None
+
+        # Correct non-square pixels so Telegram receives the real display size.
+        sample_aspect_ratio = stream.get("sample_aspect_ratio")
+        if sample_aspect_ratio and sample_aspect_ratio != "1:1":
+            try:
+                sar_width, sar_height = [int(value) for value in sample_aspect_ratio.split(":", 1)]
+                if sar_width > 0 and sar_height > 0:
+                    width = round(width * sar_width / sar_height)
+            except ValueError:
+                pass
+
+        # Correct rotation metadata for vertical videos.
+        rotate = (stream.get("tags") or {}).get("rotate")
+        if rotate in {"90", "270", "-90"}:
+            width, height = height, width
+
+        return width, height
     except Exception:
         return None, None
 
@@ -758,19 +787,20 @@ async def send_file(message, file_path, preserve_video_scale=False):
             return True
 
         if extension in VIDEO_EXTENSIONS:
-            # Fixed: show video like before instead of sending Instagram as a document.
+            # Playable video preview + correct width/height to keep aspect ratio.
             width, height = video_dimensions(file_path)
-            video_options = {"video": media, "supports_streaming": True}
+            video_options = {
+                "video": media,
+                "supports_streaming": True,
+                "filename": os.path.basename(file_path),
+            }
             if width and height:
                 video_options["width"] = width
                 video_options["height"] = height
             await message.reply_video(**video_options)
             return True
 
-        await message.reply_document(
-            document=media,
-            filename=os.path.basename(file_path),
-        )
+        await message.reply_document(document=media, filename=os.path.basename(file_path))
         return True
 
 
@@ -819,8 +849,6 @@ async def send_clean_error(message):
 async def send_download(message, url, context=None, kind="video"):
     files_to_send = []
     cleanup_files = []
-    # Fixed: do not force Instagram/Facebook as document. Show video like before.
-    preserve_video_scale = False
     url = normalize_url(url)
     await message.reply_text("Downloading... ⏳")
     try:
@@ -828,12 +856,15 @@ async def send_download(message, url, context=None, kind="video"):
         file_path = download_with_yt_dlp(url, ydl_options(url, kind=kind))
         files_to_send = downloaded_files(before_files, file_path)
         cleanup_files = list(files_to_send)
+
         if not files_to_send:
             raise RuntimeError("Download finished, but no media file was found.")
+
         sent_any = False
         for path in files_to_send:
-            sent_any = await send_file(message, path, preserve_video_scale=preserve_video_scale) or sent_any
+            sent_any = await send_file(message, path) or sent_any
         return sent_any
+
     except Exception as error:
         if is_tiktok_url(url) and kind == "video":
             try:
@@ -928,7 +959,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
     app.add_error_handler(handle_error)
-    print("BahezBot v3 fixed running...")
+    print("BahezBot video download fixed running...")
     app.run_polling(drop_pending_updates=True)
 
 
