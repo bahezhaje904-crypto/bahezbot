@@ -26,10 +26,11 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("Missing TOKEN environment variable. Add TOKEN in Railway Variables.")
 
+# Add your Telegram numeric ID in Railway Variables as OWNER_ID for admin commands.
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
-REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()  # Example: @YourChannel
 SPONSOR_TEXT = os.getenv("SPONSOR_TEXT", "").strip()
-ERROR_GROUP_ID = os.getenv("ERROR_GROUP_ID", "").strip()
+ERROR_GROUP_ID = os.getenv("ERROR_GROUP_ID", "").strip()  # Example: -1001234567890 or @your_error_group
 
 DB_PATH = "bot.db"
 DOWNLOAD_DIR = "downloads"
@@ -609,7 +610,6 @@ def instagram_cookie_message():
         "If it still fails, export fresh Instagram cookies while logged in and replace the old value."
     )
 
-
 def youtube_cookie_error(error):
     error_text = str(error).lower()
     return any(
@@ -648,7 +648,6 @@ def ydl_options(url, kind="video"):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36"
         },
     }
-
     if kind == "mp3":
         options.update(
             {
@@ -658,11 +657,12 @@ def ydl_options(url, kind="video"):
         )
     else:
         if is_instagram_url(url):
-            # Important: single-file MP4 only. This avoids the FFmpeg merge error and keeps Telegram preview.
-            options["format"] = "best[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4]/best"
+            # Prefer the original Instagram Reel stream. This avoids the cropped/zoomed
+            # 1:1 or center-cropped variants that Instagram sometimes exposes.
+            options["format"] = "bv*+ba/b"
+            options["merge_output_format"] = "mp4"
         else:
             options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
-
     if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
@@ -724,18 +724,7 @@ def video_dimensions(file_path):
         return None, None
     try:
         result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=width,height,sample_aspect_ratio:stream_tags=rotate",
-                "-of",
-                "json",
-                file_path,
-            ],
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", file_path],
             check=True,
             capture_output=True,
             text=True,
@@ -744,29 +733,7 @@ def video_dimensions(file_path):
         streams = json.loads(result.stdout).get("streams") or []
         if not streams:
             return None, None
-
-        stream = streams[0]
-        width = stream.get("width")
-        height = stream.get("height")
-        if not width or not height:
-            return None, None
-
-        # Correct non-square pixels so Telegram receives the real display size.
-        sample_aspect_ratio = stream.get("sample_aspect_ratio")
-        if sample_aspect_ratio and sample_aspect_ratio != "1:1":
-            try:
-                sar_width, sar_height = [int(value) for value in sample_aspect_ratio.split(":", 1)]
-                if sar_width > 0 and sar_height > 0:
-                    width = round(width * sar_width / sar_height)
-            except ValueError:
-                pass
-
-        # Correct rotation metadata for vertical videos.
-        rotate = (stream.get("tags") or {}).get("rotate")
-        if rotate in {"90", "270", "-90"}:
-            width, height = height, width
-
-        return width, height
+        return streams[0].get("width"), streams[0].get("height")
     except Exception:
         return None, None
 
@@ -787,20 +754,31 @@ async def send_file(message, file_path, preserve_video_scale=False):
             return True
 
         if extension in VIDEO_EXTENSIONS:
-            # Playable video preview + correct width/height to keep aspect ratio.
             width, height = video_dimensions(file_path)
-            video_options = {
-                "video": media,
-                "supports_streaming": True,
-                "filename": os.path.basename(file_path),
-            }
+
+            # Portrait videos like Instagram Reels, TikTok, and Facebook Reels can be
+            # resized/cropped by Telegram when sent as normal videos. Sending them as
+            # documents preserves the original size, quality, and aspect ratio.
+            is_portrait = bool(width and height and height > width)
+            if preserve_video_scale or is_portrait:
+                await message.reply_document(
+                    document=media,
+                    filename=os.path.basename(file_path),
+                )
+                return True
+
+            video_options = {"video": media, "supports_streaming": True}
             if width and height:
                 video_options["width"] = width
                 video_options["height"] = height
+
             await message.reply_video(**video_options)
             return True
 
-        await message.reply_document(document=media, filename=os.path.basename(file_path))
+        await message.reply_document(
+            document=media,
+            filename=os.path.basename(file_path),
+        )
         return True
 
 
@@ -849,6 +827,8 @@ async def send_clean_error(message):
 async def send_download(message, url, context=None, kind="video"):
     files_to_send = []
     cleanup_files = []
+    # Send Instagram and Facebook as documents to preserve the original aspect ratio.
+    preserve_video_scale = is_facebook_url(url) or is_instagram_url(url)
     url = normalize_url(url)
     await message.reply_text("Downloading... ⏳")
     try:
@@ -856,15 +836,12 @@ async def send_download(message, url, context=None, kind="video"):
         file_path = download_with_yt_dlp(url, ydl_options(url, kind=kind))
         files_to_send = downloaded_files(before_files, file_path)
         cleanup_files = list(files_to_send)
-
         if not files_to_send:
             raise RuntimeError("Download finished, but no media file was found.")
-
         sent_any = False
         for path in files_to_send:
-            sent_any = await send_file(message, path) or sent_any
+            sent_any = await send_file(message, path, preserve_video_scale=preserve_video_scale) or sent_any
         return sent_any
-
     except Exception as error:
         if is_tiktok_url(url) and kind == "video":
             try:
@@ -876,20 +853,12 @@ async def send_download(message, url, context=None, kind="video"):
                         sent_any = await send_file(message, path) or sent_any
                     return sent_any
             except Exception as fallback_error:
-                await report_download_error(context, message, url, fallback_error, kind)
-                await send_clean_error(message)
+                await message.reply_text(f"TikTok error:\n{fallback_error}")
                 return False
-
-        await report_download_error(context, message, url, error, kind)
-
-        if is_instagram_url(url) and instagram_cookie_error(error):
-            await send_clean_error(message)
-            return False
         if is_youtube_url(url) and youtube_cookie_error(error):
             await message.reply_text(youtube_cookie_message())
             return False
-
-        await send_clean_error(message)
+        await message.reply_text(f"Error:\n{error}")
         return False
     finally:
         for path in set(cleanup_files):
@@ -959,7 +928,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
     app.add_error_handler(handle_error)
-    print("BahezBot video download fixed running...")
+    print("BahezBot v3 running...")
     app.run_polling(drop_pending_updates=True)
 
 
