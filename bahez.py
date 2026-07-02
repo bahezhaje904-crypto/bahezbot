@@ -12,7 +12,6 @@ from urllib.parse import quote
 import requests
 import yt_dlp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ChatMemberStatus
 from telegram.error import BadRequest, Conflict, Forbidden, NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
@@ -27,49 +26,37 @@ TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("Missing TOKEN environment variable. Add TOKEN in Railway Variables.")
 
+# Add your Telegram numeric ID in Railway Variables as OWNER_ID for admin commands.
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()  # Example: @YourChannel
+SPONSOR_TEXT = os.getenv("SPONSOR_TEXT", "").strip()
+
 DB_PATH = "bot.db"
 DOWNLOAD_DIR = "downloads"
 SHARE_INTERVAL = timedelta(days=5)
+FREE_DAILY_LIMIT = int(os.getenv("FREE_DAILY_LIMIT", "20"))
+VIP_DAILY_LIMIT = int(os.getenv("VIP_DAILY_LIMIT", "9999"))
+MAX_TELEGRAM_SIZE = 49 * 1024 * 1024
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
-AUDIO_EXTENSIONS = {".mp3", ".m4a", ".opus", ".ogg", ".wav"}
 TIKWM_API_URL = "https://www.tikwm.com/api/"
 DEFAULT_COOKIES_FILE = "cookies.txt"
 RUNTIME_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "youtube_cookies.txt")
-MAX_TELEGRAM_SIZE = 49 * 1024 * 1024
-FREE_DAILY_LIMIT = int(os.getenv("FREE_DAILY_LIMIT", "20"))
-CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "").strip()  # example: @yourchannel
-ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-def prepare_cookies_file():
-    cookies_text = os.getenv("YOUTUBE_COOKIES_TEXT")
-    cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64")
-
-    if cookies_b64:
-        try:
-            cookies_text = base64.b64decode(cookies_b64).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            cookies_text = None
-
-    if cookies_text:
-        with open(RUNTIME_COOKIES_FILE, "w", encoding="utf-8") as cookies_file:
-            cookies_file.write(cookies_text)
-        return RUNTIME_COOKIES_FILE
-
-    custom_cookies_file = os.getenv("COOKIES_FILE")
-    if custom_cookies_file:
-        return custom_cookies_file
-
-    if os.path.exists(DEFAULT_COOKIES_FILE):
-        return DEFAULT_COOKIES_FILE
-
-    return None
+def utc_now():
+    return datetime.now(UTC)
 
 
-COOKIES_FILE = prepare_cookies_file()
+def today_prefix():
+    return utc_now().date().isoformat()
+
+
+def is_owner(user_id):
+    return OWNER_ID and user_id == OWNER_ID
 
 
 def db_connect():
@@ -87,13 +74,9 @@ def init_db():
                 referrer_id INTEGER,
                 referral_count INTEGER NOT NULL DEFAULT 0,
                 last_shared_at TEXT NOT NULL,
-                joined_at TEXT NOT NULL,
-                last_active_at TEXT NOT NULL,
-                is_banned INTEGER NOT NULL DEFAULT 0,
                 is_vip INTEGER NOT NULL DEFAULT 0,
-                downloads_total INTEGER NOT NULL DEFAULT 0,
-                downloads_today INTEGER NOT NULL DEFAULT 0,
-                downloads_date TEXT NOT NULL
+                is_banned INTEGER NOT NULL DEFAULT 0,
+                joined_at TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -103,51 +86,44 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 platform TEXT NOT NULL,
-                mode TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'video',
                 created_at TEXT NOT NULL
             )
             """
         )
-
-        # Upgrade old databases safely.
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
-        today = datetime.now(UTC).date().isoformat()
-        defaults = {
-            "joined_at": "TEXT NOT NULL DEFAULT ''",
-            "last_active_at": "TEXT NOT NULL DEFAULT ''",
-            "is_banned": "INTEGER NOT NULL DEFAULT 0",
-            "is_vip": "INTEGER NOT NULL DEFAULT 0",
-            "downloads_total": "INTEGER NOT NULL DEFAULT 0",
-            "downloads_today": "INTEGER NOT NULL DEFAULT 0",
-            "downloads_date": f"TEXT NOT NULL DEFAULT '{today}'",
-        }
-        for column, definition in defaults.items():
-            if column not in columns:
-                conn.execute(f"ALTER TABLE users ADD COLUMN {column} {definition}")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS broadcasts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER NOT NULL,
+                message TEXT NOT NULL,
+                sent_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        ensure_columns(conn)
 
 
-def utc_now():
-    return datetime.now(UTC)
-
-
-def today_str():
-    return utc_now().date().isoformat()
-
-
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
+def ensure_columns(conn):
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "is_vip" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN is_vip INTEGER NOT NULL DEFAULT 0")
+    if "is_banned" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+    if "joined_at" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN joined_at TEXT NOT NULL DEFAULT ''")
 
 
 def register_user(user, referrer_id=None):
     now = utc_now().isoformat()
-    today = today_str()
     with db_connect() as conn:
         existing = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (user.id,)).fetchone()
-
         if existing:
             conn.execute(
-                "UPDATE users SET first_name = ?, username = ?, last_active_at = ? WHERE user_id = ?",
-                (user.first_name, user.username, now, user.id),
+                "UPDATE users SET first_name = ?, username = ? WHERE user_id = ?",
+                (user.first_name, user.username, user.id),
             )
             return
 
@@ -160,82 +136,75 @@ def register_user(user, referrer_id=None):
 
         conn.execute(
             """
-            INSERT INTO users (
-                user_id, first_name, username, referrer_id, referral_count,
-                last_shared_at, joined_at, last_active_at, is_banned, is_vip,
-                downloads_total, downloads_today, downloads_date
-            ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, 0, 0, 0, 0, ?)
+            INSERT INTO users (user_id, first_name, username, referrer_id, last_shared_at, joined_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user.id, user.first_name, user.username, referrer_id if valid_referrer else None, now, now, now, today),
+            (user.id, user.first_name, user.username, referrer_id if valid_referrer else None, now, now),
         )
-
         if valid_referrer:
             conn.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?", (referrer_id,))
 
 
-def get_user_row(user_id):
+def user_row(user_id):
     with db_connect() as conn:
-        conn.row_factory = sqlite3.Row
-        return conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return conn.execute(
+            "SELECT user_id, first_name, username, referral_count, is_vip, is_banned FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
 
 
 def is_banned(user_id):
-    row = get_user_row(user_id)
-    return bool(row and row["is_banned"])
+    row = user_row(user_id)
+    return bool(row and row[5])
 
 
-def reset_daily_if_needed(user_id):
-    today = today_str()
+def is_vip(user_id):
+    row = user_row(user_id)
+    return bool(row and row[4])
+
+
+def set_vip(user_id, value):
     with db_connect() as conn:
-        row = conn.execute("SELECT downloads_date FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        if row and row[0] != today:
-            conn.execute(
-                "UPDATE users SET downloads_today = 0, downloads_date = ? WHERE user_id = ?",
-                (today, user_id),
-            )
+        conn.execute("UPDATE users SET is_vip = ? WHERE user_id = ?", (1 if value else 0, user_id))
+
+
+def set_ban(user_id, value):
+    with db_connect() as conn:
+        conn.execute("UPDATE users SET is_banned = ? WHERE user_id = ?", (1 if value else 0, user_id))
+
+
+def count_users():
+    with db_connect() as conn:
+        return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+
+def downloads_today(user_id):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM downloads WHERE user_id = ? AND created_at LIKE ?",
+            (user_id, f"{today_prefix()}%"),
+        ).fetchone()[0]
 
 
 def can_download(user_id):
-    if is_admin(user_id):
-        return True, ""
-    reset_daily_if_needed(user_id)
-    row = get_user_row(user_id)
-    if not row:
-        return False, "Please use /start first."
-    if row["is_banned"]:
-        return False, "Your account is banned."
-    if row["is_vip"]:
-        return True, ""
-    if row["downloads_today"] >= FREE_DAILY_LIMIT:
-        return False, f"Daily limit reached ({FREE_DAILY_LIMIT}). Try again tomorrow or ask admin for VIP."
-    return True, ""
+    limit = VIP_DAILY_LIMIT if is_vip(user_id) else FREE_DAILY_LIMIT
+    return downloads_today(user_id) < limit, limit
 
 
-def log_download(user_id, platform, mode):
-    now = utc_now().isoformat()
-    reset_daily_if_needed(user_id)
+def log_download(user_id, url, kind="video"):
     with db_connect() as conn:
         conn.execute(
-            "INSERT INTO downloads (user_id, platform, mode, created_at) VALUES (?, ?, ?, ?)",
-            (user_id, platform, mode, now),
-        )
-        conn.execute(
-            """
-            UPDATE users
-            SET downloads_total = downloads_total + 1,
-                downloads_today = downloads_today + 1,
-                last_active_at = ?
-            WHERE user_id = ?
-            """,
-            (now, user_id),
+            "INSERT INTO downloads (user_id, platform, kind, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, platform_name(url), kind, utc_now().isoformat()),
         )
 
 
 def should_share(user_id):
-    row = get_user_row(user_id)
-    if not row or row["is_vip"] or is_admin(user_id):
+    with db_connect() as conn:
+        row = conn.execute("SELECT last_shared_at FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    if not row:
         return False
-    last_shared_at = datetime.fromisoformat(row["last_shared_at"])
+    last_shared_at = datetime.fromisoformat(row[0])
     if last_shared_at.tzinfo is None:
         last_shared_at = last_shared_at.replace(tzinfo=UTC)
     return utc_now() - last_shared_at >= SHARE_INTERVAL
@@ -246,24 +215,44 @@ def mark_shared(user_id):
         conn.execute("UPDATE users SET last_shared_at = ? WHERE user_id = ?", (utc_now().isoformat(), user_id))
 
 
-async def check_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not CHANNEL_USERNAME or is_admin(update.effective_user.id):
+def platform_name(url):
+    lowered = url.lower()
+    if "tiktok" in lowered:
+        return "TikTok"
+    if "instagram" in lowered:
+        return "Instagram"
+    if "facebook" in lowered or "fb.watch" in lowered:
+        return "Facebook"
+    if "youtube" in lowered or "youtu.be" in lowered:
+        return "YouTube"
+    if "x.com" in lowered or "twitter" in lowered:
+        return "X/Twitter"
+    return "Other"
+
+
+def main_menu():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("👤 Profile", callback_data="profile"), InlineKeyboardButton("🏆 Top", callback_data="top")],
+            [InlineKeyboardButton("📊 Stats", callback_data="stats"), InlineKeyboardButton("💎 VIP", callback_data="vip_info")],
+            [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
+        ]
+    )
+
+
+async def check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not REQUIRED_CHANNEL:
         return True
     try:
-        member = await context.bot.get_chat_member(CHANNEL_USERNAME, update.effective_user.id)
-        if member.status in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+        member = await context.bot.get_chat_member(REQUIRED_CHANNEL, update.effective_user.id)
+        if member.status in ("member", "administrator", "creator"):
             return True
     except Exception:
-        return True  # Do not block downloads if Telegram cannot check the channel.
-
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Join Channel", url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")]])
-    await update.message.reply_text("Join our channel first, then send the link again.", reply_markup=keyboard)
+        pass
+    await update.effective_message.reply_text(
+        f"📢 Please join our channel first: {REQUIRED_CHANNEL}\nThen send your link again."
+    )
     return False
-
-
-def extract_first_url(text):
-    urls = re.findall(r"https?://[^\s]+", text or "")
-    return urls[0].strip() if urls else None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -274,32 +263,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             referrer_id = None
     register_user(update.effective_user, referrer_id)
+    total = count_users()
     await update.message.reply_text(
         "👋 Welcome to Bahez Video Downloader\n\n"
-        "Send a TikTok, Instagram, Facebook, or YouTube link.\n"
+        f"👥 Subscribers: {total}\n\n"
+        "Send a TikTok, Instagram, Facebook, YouTube, or X link.\n\n"
         "Commands:\n"
         "/mp3 <link> - download audio\n"
         "/top - top inviters\n"
-        "/profile - your account"
+        "/profile - your account\n"
+        "/stats - bot stats",
+        reply_markup=main_menu(),
     )
 
 
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    register_user(update.effective_user)
-    row = get_user_row(update.effective_user.id)
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👤 Your Profile\n\n"
-        f"VIP: {'✅ Yes' if row['is_vip'] else '❌ No'}\n"
-        f"Downloads today: {row['downloads_today']}/{FREE_DAILY_LIMIT}\n"
-        f"Total downloads: {row['downloads_total']}\n"
-        f"Invites: {row['referral_count']}"
+        "ℹ️ How to use:\n\n"
+        "1. Send a video link to download video.\n"
+        "2. Use /mp3 <link> for audio only.\n"
+        "3. Use /profile to see your account.\n"
+        "4. Invite friends to climb /top."
     )
 
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
+    await send_top(update.effective_message)
+
+
+async def send_top(message):
+    total = count_users()
     with db_connect() as conn:
-        total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         rows = conn.execute(
             """
             SELECT first_name, username, referral_count
@@ -309,197 +304,236 @@ async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
             LIMIT 10
             """
         ).fetchall()
-
-    lines = [f"👥 Total subscribers: {total_users}", "", "🏆 Top inviters:"]
+    lines = [f"👥 Total subscribers: {total}", "", "🏆 Top inviters:"]
     if not rows:
         lines.append("No invites yet.")
     else:
         for index, (first_name, username, referral_count) in enumerate(rows, start=1):
             name = f"@{username}" if username else first_name or "Unknown"
             lines.append(f"{index}. {name} - {referral_count} joined")
-    await update.message.reply_text("\n".join(lines))
+    await message.reply_text("\n".join(lines))
+
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.effective_user)
+    await send_profile(update.effective_message, update.effective_user.id)
+
+
+async def send_profile(message, user_id):
+    row = user_row(user_id)
+    invites = row[3] if row else 0
+    vip = "✅ Yes" if is_vip(user_id) else "❌ No"
+    used = downloads_today(user_id)
+    limit = VIP_DAILY_LIMIT if is_vip(user_id) else FREE_DAILY_LIMIT
+    with db_connect() as conn:
+        total_downloads = conn.execute("SELECT COUNT(*) FROM downloads WHERE user_id = ?", (user_id,)).fetchone()[0]
+    await message.reply_text(
+        "👤 Your Profile\n\n"
+        f"💎 VIP: {vip}\n"
+        f"📥 Downloads today: {used}/{limit}\n"
+        f"📦 Total downloads: {total_downloads}\n"
+        f"👥 Invites: {invites}"
+    )
 
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Admin only.")
-        return
+    await send_stats(update.effective_message)
 
-    today = today_str()
-    week_ago = (utc_now() - timedelta(days=7)).isoformat()
-    month_ago = (utc_now() - timedelta(days=30)).isoformat()
+
+async def send_stats(message):
+    now = utc_now()
+    today = today_prefix()
+    week_ago = (now - timedelta(days=7)).isoformat()
     with db_connect() as conn:
         total_users = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         vip_users = conn.execute("SELECT COUNT(*) FROM users WHERE is_vip = 1").fetchone()[0]
         banned_users = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetchone()[0]
-        new_today = conn.execute("SELECT COUNT(*) FROM users WHERE substr(joined_at, 1, 10) = ?", (today,)).fetchone()[0]
-        downloads_today = conn.execute("SELECT COUNT(*) FROM downloads WHERE substr(created_at, 1, 10) = ?", (today,)).fetchone()[0]
-        downloads_week = conn.execute("SELECT COUNT(*) FROM downloads WHERE created_at >= ?", (week_ago,)).fetchone()[0]
-        downloads_month = conn.execute("SELECT COUNT(*) FROM downloads WHERE created_at >= ?", (month_ago,)).fetchone()[0]
-        platform_rows = conn.execute(
-            "SELECT platform, COUNT(*) FROM downloads GROUP BY platform ORDER BY COUNT(*) DESC LIMIT 5"
-        ).fetchall()
-
-    platforms = "\n".join(f"• {p}: {c}" for p, c in platform_rows) or "No downloads yet."
-    await update.message.reply_text(
-        "📊 Admin Stats\n\n"
+        total_downloads = conn.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
+        downloads_today_count = conn.execute("SELECT COUNT(*) FROM downloads WHERE created_at LIKE ?", (f"{today}%",)).fetchone()[0]
+        new_today = conn.execute("SELECT COUNT(*) FROM users WHERE joined_at LIKE ?", (f"{today}%",)).fetchone()[0]
+        active_week = conn.execute("SELECT COUNT(DISTINCT user_id) FROM downloads WHERE created_at >= ?", (week_ago,)).fetchone()[0]
+        top_platform = conn.execute(
+            "SELECT platform, COUNT(*) AS c FROM downloads GROUP BY platform ORDER BY c DESC LIMIT 1"
+        ).fetchone()
+    platform_text = f"{top_platform[0]} ({top_platform[1]})" if top_platform else "No downloads yet"
+    await message.reply_text(
+        "📊 Bot Statistics\n\n"
         f"👥 Subscribers: {total_users}\n"
         f"🆕 New today: {new_today}\n"
-        f"👑 VIP: {vip_users}\n"
-        f"🚫 Banned: {banned_users}\n\n"
-        f"📥 Downloads today: {downloads_today}\n"
-        f"📥 Downloads 7 days: {downloads_week}\n"
-        f"📥 Downloads 30 days: {downloads_month}\n\n"
-        f"🔥 Platforms:\n{platforms}"
+        f"💎 VIP users: {vip_users}\n"
+        f"🚫 Banned users: {banned_users}\n"
+        f"📥 Total downloads: {total_downloads}\n"
+        f"📥 Downloads today: {downloads_today_count}\n"
+        f"🔥 Active this week: {active_week}\n"
+        f"🏅 Top platform: {platform_text}"
     )
 
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    register_user(update.effective_user)
-    if not is_admin(update.effective_user.id):
+    if not is_owner(update.effective_user.id):
         return
     await update.message.reply_text(
-        "🛠 Admin Panel\n\n"
+        "👑 Admin Panel\n\n"
         "/stats - bot statistics\n"
-        "/broadcast Your message - send text to all users\n"
-        "/ban USER_ID - ban user\n"
-        "/unban USER_ID - unban user\n"
-        "/vip USER_ID - add VIP\n"
-        "/unvip USER_ID - remove VIP\n"
-        "/users - recent users\n"
-        "/backup - send database backup"
+        "/broadcast <message> - send to all users\n"
+        "/vip <user_id> - give VIP\n"
+        "/unvip <user_id> - remove VIP\n"
+        "/ban <user_id> - ban user\n"
+        "/unban <user_id> - unban user"
     )
 
 
-async def users_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+async def vip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
         return
-    with db_connect() as conn:
-        rows = conn.execute(
-            "SELECT user_id, first_name, username, downloads_total FROM users ORDER BY joined_at DESC LIMIT 20"
-        ).fetchall()
-    lines = ["👥 Recent users:"]
-    for user_id, first_name, username, downloads_total in rows:
-        name = f"@{username}" if username else first_name or "Unknown"
-        lines.append(f"{user_id} | {name} | downloads: {downloads_total}")
-    await update.message.reply_text("\n".join(lines))
-
-
-async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not context.args:
+        await update.message.reply_text("Use: /vip user_id")
         return
-    if not os.path.exists(DB_PATH):
-        await update.message.reply_text("No database yet.")
+    set_vip(int(context.args[0]), True)
+    await update.message.reply_text("✅ VIP added.")
+
+
+async def unvip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
         return
-    with open(DB_PATH, "rb") as db_file:
-        await update.message.reply_document(document=db_file, filename="bot_backup.db")
-
-
-async def set_flag(update: Update, context: ContextTypes.DEFAULT_TYPE, column: str, value: int, label: str):
-    if not is_admin(update.effective_user.id):
+    if not context.args:
+        await update.message.reply_text("Use: /unvip user_id")
         return
-    if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("Send user ID. Example: /vip 123456789")
+    set_vip(int(context.args[0]), False)
+    await update.message.reply_text("✅ VIP removed.")
+
+
+async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
         return
-    user_id = int(context.args[0])
-    with db_connect() as conn:
-        conn.execute(f"UPDATE users SET {column} = ? WHERE user_id = ?", (value, user_id))
-    await update.message.reply_text(f"Done: {label} {user_id}")
+    if not context.args:
+        await update.message.reply_text("Use: /ban user_id")
+        return
+    set_ban(int(context.args[0]), True)
+    await update.message.reply_text("🚫 User banned.")
 
 
-async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await set_flag(update, context, "is_banned", 1, "banned")
-
-
-async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await set_flag(update, context, "is_banned", 0, "unbanned")
-
-
-async def vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await set_flag(update, context, "is_vip", 1, "VIP added")
-
-
-async def unvip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await set_flag(update, context, "is_vip", 0, "VIP removed")
+async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_owner(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Use: /unban user_id")
+        return
+    set_ban(int(context.args[0]), False)
+    await update.message.reply_text("✅ User unbanned.")
 
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not is_owner(update.effective_user.id):
         return
     text = " ".join(context.args).strip()
     if not text:
-        await update.message.reply_text("Use: /broadcast Your message here")
+        await update.message.reply_text("Use: /broadcast your message here")
         return
-
     with db_connect() as conn:
         user_ids = [row[0] for row in conn.execute("SELECT user_id FROM users WHERE is_banned = 0").fetchall()]
-
-    sent = 0
-    failed = 0
-    status_msg = await update.message.reply_text(f"Broadcast started to {len(user_ids)} users...")
-    for user_id in user_ids:
+    sent = failed = 0
+    status = await update.message.reply_text(f"📢 Broadcasting to {len(user_ids)} users...")
+    for uid in user_ids:
         try:
-            await context.bot.send_message(chat_id=user_id, text=text)
+            await context.bot.send_message(chat_id=uid, text=text)
             sent += 1
-        except (Forbidden, BadRequest, NetworkError, TimedOut):
+        except Exception:
             failed += 1
-    await status_msg.edit_text(f"Broadcast finished.\n✅ Sent: {sent}\n❌ Failed: {failed}")
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO broadcasts (admin_id, message, sent_count, failed_count, created_at) VALUES (?, ?, ?, ?, ?)",
+            (update.effective_user.id, text, sent, failed, utc_now().isoformat()),
+        )
+    await status.edit_text(f"📢 Broadcast done.\n✅ Sent: {sent}\n❌ Failed: {failed}")
 
 
-async def send_share_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, mode: str):
+async def send_share_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     bot_username = (await context.bot.get_me()).username
     invite_link = f"https://t.me/{bot_username}?start=ref_{update.effective_user.id}"
     share_text = "Join this video downloader bot:"
     share_url = f"tg://msg_url?url={quote(invite_link)}&text={quote(share_text)}"
     context.user_data["pending_download_url"] = url
-    context.user_data["pending_download_mode"] = mode
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Share to 1 person", url=share_url)], [InlineKeyboardButton("Done after sharing", callback_data="share_done")]]
     )
-    await update.message.reply_text("Every 5 days, share your invite link with 1 person to keep downloading.", reply_markup=keyboard)
+    await update.message.reply_text(
+        "Every 5 days, share your invite link with 1 person to keep downloading.",
+        reply_markup=keyboard,
+    )
 
 
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
     if is_banned(update.effective_user.id):
-        await update.message.reply_text("Your account is banned.")
+        await update.message.reply_text("🚫 You are banned from using this bot.")
         return
-    if not await check_force_join(update, context):
+    if not await check_channel(update, context):
         return
-
-    url = extract_first_url(update.message.text)
-    if not url:
-        await update.message.reply_text("Please send a valid photo or video link.")
-        return
-
-    if should_share(update.effective_user.id):
-        await send_share_prompt(update, context, url, "video")
-        return
-
-    ok, reason = can_download(update.effective_user.id)
+    ok, limit = can_download(update.effective_user.id)
     if not ok:
-        await update.message.reply_text(reason)
+        await update.message.reply_text(f"Daily limit reached ({limit}). Upgrade to VIP for unlimited downloads.")
         return
-    await send_download(update.message, update.effective_user.id, url, mode="video")
+    text = update.message.text or ""
+    urls = re.findall(r"https?://[^\s]+", text)
+    if not urls:
+        await update.message.reply_text("Please send a valid video link.")
+        return
+    url = urls[0].strip()
+    if should_share(update.effective_user.id):
+        await send_share_prompt(update, context, url)
+        return
+    success = await send_download(update.message, url, kind="video")
+    if success:
+        log_download(update.effective_user.id, url, "video")
+        if SPONSOR_TEXT:
+            await update.message.reply_text(SPONSOR_TEXT)
 
 
 async def mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
     if is_banned(update.effective_user.id):
-        await update.message.reply_text("Your account is banned.")
+        await update.message.reply_text("🚫 You are banned from using this bot.")
         return
-    if not await check_force_join(update, context):
+    if not await check_channel(update, context):
         return
-    url = extract_first_url(" ".join(context.args)) or extract_first_url(update.message.text)
-    if not url:
+    ok, limit = can_download(update.effective_user.id)
+    if not ok:
+        await update.message.reply_text(f"Daily limit reached ({limit}). Upgrade to VIP for unlimited downloads.")
+        return
+    text = " ".join(context.args)
+    urls = re.findall(r"https?://[^\s]+", text)
+    if not urls:
         await update.message.reply_text("Use: /mp3 https://youtube.com/...")
         return
-    ok, reason = can_download(update.effective_user.id)
-    if not ok:
-        await update.message.reply_text(reason)
-        return
-    await send_download(update.message, update.effective_user.id, url, mode="mp3")
+    url = urls[0].strip()
+    success = await send_download(update.message, url, kind="mp3")
+    if success:
+        log_download(update.effective_user.id, url, "mp3")
+
+
+def prepare_cookies_file():
+    cookies_text = os.getenv("YOUTUBE_COOKIES_TEXT")
+    cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64")
+    if cookies_b64:
+        try:
+            cookies_text = base64.b64decode(cookies_b64).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            cookies_text = None
+    if cookies_text:
+        with open(RUNTIME_COOKIES_FILE, "w", encoding="utf-8") as cookies_file:
+            cookies_file.write(cookies_text)
+        return RUNTIME_COOKIES_FILE
+    custom_cookies_file = os.getenv("COOKIES_FILE")
+    if custom_cookies_file:
+        return custom_cookies_file
+    if os.path.exists(DEFAULT_COOKIES_FILE):
+        return DEFAULT_COOKIES_FILE
+    return None
+
+
+COOKIES_FILE = prepare_cookies_file()
 
 
 def is_tiktok_url(url):
@@ -514,38 +548,18 @@ def is_youtube_url(url):
     return any(domain in url.lower() for domain in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
 
 
-def platform_name(url):
-    url_l = url.lower()
-    if is_tiktok_url(url_l):
-        return "TikTok"
-    if "instagram.com" in url_l:
-        return "Instagram"
-    if is_facebook_url(url_l):
-        return "Facebook"
-    if is_youtube_url(url_l):
-        return "YouTube"
-    return "Other"
-
-
 def youtube_cookie_error(error):
     error_text = str(error).lower()
     return any(
         phrase in error_text
-        for phrase in (
-            "sign in to confirm",
-            "not a bot",
-            "use --cookies",
-            "cookies-from-browser",
-            "confirm you’re not a bot",
-            "confirm you're not a bot",
-        )
+        for phrase in ("sign in to confirm", "not a bot", "use --cookies", "cookies-from-browser", "confirm you're not a bot")
     )
 
 
 def youtube_cookie_message():
     return (
         "YouTube is asking the server to sign in before downloading this video.\n\n"
-        "Fix: export fresh YouTube cookies from your browser and set them in YOUTUBE_COOKIES_TEXT or YOUTUBE_COOKIES_B64."
+        "Fix: export fresh YouTube cookies and set YOUTUBE_COOKIES_TEXT or YOUTUBE_COOKIES_B64 in Railway Variables."
     )
 
 
@@ -557,69 +571,7 @@ def downloaded_files(before_files, prepared_file_path):
     return sorted(new_files, key=os.path.getmtime)
 
 
-def video_dimensions(file_path):
-    extension = os.path.splitext(file_path)[1].lower()
-    if extension not in VIDEO_EXTENSIONS or not shutil.which("ffprobe"):
-        return None, None
-    command = [
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,sample_aspect_ratio:stream_tags=rotate",
-        "-of", "json", file_path,
-    ]
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=20)
-        streams = json.loads(result.stdout).get("streams") or []
-    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
-        return None, None
-    if not streams:
-        return None, None
-    stream = streams[0]
-    width = stream.get("width")
-    height = stream.get("height")
-    if not width or not height:
-        return None, None
-    sample_aspect_ratio = stream.get("sample_aspect_ratio")
-    if sample_aspect_ratio and sample_aspect_ratio != "1:1":
-        try:
-            sar_width, sar_height = [int(value) for value in sample_aspect_ratio.split(":", 1)]
-            if sar_width > 0 and sar_height > 0:
-                width = round(width * sar_width / sar_height)
-        except ValueError:
-            pass
-    rotate = (stream.get("tags") or {}).get("rotate")
-    if rotate in {"90", "270", "-90"}:
-        width, height = height, width
-    return width, height
-
-
-async def send_file(message, file_path, preserve_video_scale=False):
-    if not os.path.exists(file_path):
-        return False
-    if os.path.getsize(file_path) > MAX_TELEGRAM_SIZE:
-        await message.reply_text("The file is bigger than Telegram bot limit. Try a shorter/lower quality video.")
-        return False
-    extension = os.path.splitext(file_path)[1].lower()
-    with open(file_path, "rb") as media:
-        if extension in IMAGE_EXTENSIONS:
-            await message.reply_photo(photo=media)
-        elif extension in VIDEO_EXTENSIONS:
-            if preserve_video_scale:
-                await message.reply_document(document=media)
-                return True
-            width, height = video_dimensions(file_path)
-            options = {"video": media, "supports_streaming": True}
-            if width and height:
-                options["width"] = width
-                options["height"] = height
-            await message.reply_video(**options)
-        elif extension in AUDIO_EXTENSIONS:
-            await message.reply_audio(audio=media)
-        else:
-            await message.reply_document(document=media)
-    return True
-
-
-def ydl_options(url, mode="video"):
+def ydl_options(url, kind="video"):
     unique_name = f"%(extractor)s_%(id)s_{uuid.uuid4().hex[:8]}.%(ext)s"
     options = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, unique_name),
@@ -630,13 +582,17 @@ def ydl_options(url, mode="video"):
         "fragment_retries": 3,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36"},
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36"
+        },
     }
-    if mode == "mp3":
-        options.update({
-            "format": "bestaudio/best",
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-        })
+    if kind == "mp3":
+        options.update(
+            {
+                "format": "bestaudio/best",
+                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+            }
+        )
     else:
         options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
     if COOKIES_FILE and os.path.exists(COOKIES_FILE):
@@ -649,13 +605,7 @@ def ydl_options(url, mode="video"):
 def download_with_yt_dlp(url, options):
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        if options.get("postprocessors"):
-            base, _ = os.path.splitext(filename)
-            mp3_path = base + ".mp3"
-            if os.path.exists(mp3_path):
-                return mp3_path
-        return filename
+        return ydl.prepare_filename(info)
 
 
 def normalize_url(url):
@@ -665,10 +615,11 @@ def normalize_url(url):
 def download_tiktok_api(url):
     response = requests.get(TIKWM_API_URL, params={"url": url}, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
     response.raise_for_status()
-    data = (response.json().get("data") or {})
+    data = (response.json()).get("data") or {}
     file_paths = []
     item_id = data.get("id") or f"tiktok_{uuid.uuid4().hex[:8]}"
-    for index, image_url in enumerate(data.get("images") or [], start=1):
+    image_urls = data.get("images") or []
+    for index, image_url in enumerate(image_urls, start=1):
         if image_url.startswith("//"):
             image_url = f"https:{image_url}"
         elif image_url.startswith("/"):
@@ -694,7 +645,51 @@ def download_tiktok_api(url):
     return file_paths
 
 
-async def send_download(message, user_id, url, mode="video"):
+def video_dimensions(file_path):
+    if not shutil.which("ffprobe"):
+        return None, None
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", file_path],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        streams = json.loads(result.stdout).get("streams") or []
+        if not streams:
+            return None, None
+        return streams[0].get("width"), streams[0].get("height")
+    except Exception:
+        return None, None
+
+
+async def send_file(message, file_path, preserve_video_scale=False):
+    if not os.path.exists(file_path):
+        return False
+    if os.path.getsize(file_path) > MAX_TELEGRAM_SIZE:
+        await message.reply_text("The file is bigger than Telegram bot limit. Try a shorter/lower quality video.")
+        return False
+    extension = os.path.splitext(file_path)[1].lower()
+    with open(file_path, "rb") as media:
+        if extension in IMAGE_EXTENSIONS:
+            await message.reply_photo(photo=media)
+        elif extension in VIDEO_EXTENSIONS:
+            if preserve_video_scale:
+                await message.reply_document(document=media)
+            else:
+                width, height = video_dimensions(file_path)
+                options = {"video": media, "supports_streaming": True}
+                if width and height:
+                    options["width"] = width
+                    options["height"] = height
+                await message.reply_video(**options)
+        else:
+            await message.reply_document(document=media)
+    return True
+
+
+async def send_download(message, url, kind="video"):
     files_to_send = []
     cleanup_files = []
     preserve_video_scale = is_facebook_url(url)
@@ -702,7 +697,7 @@ async def send_download(message, user_id, url, mode="video"):
     await message.reply_text("Downloading... ⏳")
     try:
         before_files = {os.path.join(DOWNLOAD_DIR, file_name) for file_name in os.listdir(DOWNLOAD_DIR)}
-        file_path = download_with_yt_dlp(url, ydl_options(url, mode=mode))
+        file_path = download_with_yt_dlp(url, ydl_options(url, kind=kind))
         files_to_send = downloaded_files(before_files, file_path)
         cleanup_files = list(files_to_send)
         if not files_to_send:
@@ -710,10 +705,9 @@ async def send_download(message, user_id, url, mode="video"):
         sent_any = False
         for path in files_to_send:
             sent_any = await send_file(message, path, preserve_video_scale=preserve_video_scale) or sent_any
-        if sent_any:
-            log_download(user_id, platform_name(url), mode)
+        return sent_any
     except Exception as error:
-        if is_tiktok_url(url) and mode == "video":
+        if is_tiktok_url(url) and kind == "video":
             try:
                 files_to_send = download_tiktok_api(url)
                 cleanup_files = list(files_to_send)
@@ -721,16 +715,15 @@ async def send_download(message, user_id, url, mode="video"):
                     sent_any = False
                     for path in files_to_send:
                         sent_any = await send_file(message, path) or sent_any
-                    if sent_any:
-                        log_download(user_id, "TikTok", mode)
-                    return
+                    return sent_any
             except Exception as fallback_error:
                 await message.reply_text(f"TikTok error:\n{fallback_error}")
-                return
+                return False
         if is_youtube_url(url) and youtube_cookie_error(error):
             await message.reply_text(youtube_cookie_message())
-            return
+            return False
         await message.reply_text(f"Error:\n{error}")
+        return False
     finally:
         for path in set(cleanup_files):
             try:
@@ -745,20 +738,37 @@ async def share_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     mark_shared(update.effective_user.id)
     url = context.user_data.pop("pending_download_url", None)
-    mode = context.user_data.pop("pending_download_mode", "video")
     if not url:
         await query.message.reply_text("Thanks. Send your video link again.")
         return
     await query.message.reply_text("Thanks for sharing. Your download will start now.")
-    await send_download(query.message, update.effective_user.id, url, mode=mode)
+    success = await send_download(query.message, url)
+    if success:
+        log_download(update.effective_user.id, url, "video")
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data == "profile":
+        await send_profile(query.message, query.from_user.id)
+    elif data == "top":
+        await send_top(query.message)
+    elif data == "stats":
+        await send_stats(query.message)
+    elif data == "vip_info":
+        await query.message.reply_text("💎 VIP gives more downloads and priority access. Contact the bot owner.")
+    elif data == "help":
+        await query.message.reply_text("Send a video link, or use /mp3 <link> for audio.")
 
 
 async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     if isinstance(context.error, Conflict):
         print("Telegram conflict: another bot instance is polling with the same TOKEN.")
         return
-    if isinstance(context.error, (NetworkError, TimedOut)):
-        print(f"Telegram network error: {context.error}")
+    if isinstance(context.error, (NetworkError, TimedOut, BadRequest, Forbidden)):
+        print(f"Telegram error: {context.error}")
         return
     print(f"Unhandled bot error: {context.error}")
 
@@ -767,22 +777,22 @@ def main():
     init_db()
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("profile", profile))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("users", users_cmd))
-    app.add_handler(CommandHandler("backup", backup))
     app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CommandHandler("ban", ban))
-    app.add_handler(CommandHandler("unban", unban))
-    app.add_handler(CommandHandler("vip", vip))
-    app.add_handler(CommandHandler("unvip", unvip))
+    app.add_handler(CommandHandler("vip", vip_command))
+    app.add_handler(CommandHandler("unvip", unvip_command))
+    app.add_handler(CommandHandler("ban", ban_command))
+    app.add_handler(CommandHandler("unban", unban_command))
     app.add_handler(CommandHandler("mp3", mp3))
     app.add_handler(CallbackQueryHandler(share_done, pattern="^share_done$"))
+    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
     app.add_error_handler(handle_error)
-    print("Bot running...")
+    print("BahezBot v3 running...")
     app.run_polling(drop_pending_updates=True)
 
 
