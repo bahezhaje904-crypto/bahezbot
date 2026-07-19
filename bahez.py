@@ -910,7 +910,7 @@ async def send_file(message, file_path, preserve_video_scale=False):
             await message.reply_document(
                 document=media,
                 filename=os.path.basename(file_path),
-                caption="📁 Original video file",
+                caption="📁 ڤیدۆکە بە فول کوالیتی",
             )
             return True
 
@@ -926,7 +926,7 @@ async def send_video_cover(message, thumbnail_url, video_path):
         try:
             await message.reply_photo(
                 photo=thumbnail_url,
-                caption="🖼 Video cover",
+                caption="🖼 وێنەی سەرەتای ڤیدیۆکە",
             )
             return
         except Exception as error:
@@ -939,7 +939,7 @@ async def send_video_cover(message, thumbnail_url, video_path):
         with open(frame_path, "rb") as frame:
             await message.reply_photo(
                 photo=frame,
-                caption="🖼 First frame",
+                caption="🖼 وێنەی سەرەتای ڤیدیۆکە",
             )
     finally:
         try:
@@ -997,7 +997,7 @@ async def send_download(message, url, context=None, kind="video"):
     # Send Instagram and Facebook as documents to preserve the original aspect ratio.
     preserve_video_scale = is_facebook_url(url) or is_instagram_url(url)
     url = normalize_url(url)
-    await message.reply_text("Downloading... ⏳")
+    await message.reply_text("چاوەڕوانە... ⏳")
     try:
         before_files = {os.path.join(DOWNLOAD_DIR, file_name) for file_name in os.listdir(DOWNLOAD_DIR)}
         download_result = await asyncio.to_thread(download_with_yt_dlp, url, ydl_options(url, kind=kind))
