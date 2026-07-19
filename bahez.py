@@ -910,7 +910,7 @@ async def send_file(message, file_path, preserve_video_scale=False):
             await message.reply_document(
                 document=media,
                 filename=os.path.basename(file_path),
-                caption="📁 ڤیدۆکە بە فول کوالیتی",
+                caption="📁 ڤیدیۆکە بە فول کوالیتی 🔥 ",
             )
             return True
 
