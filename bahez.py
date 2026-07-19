@@ -811,7 +811,18 @@ def video_dimensions(file_path):
         return None, None
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", file_path],
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,display_aspect_ratio,sample_aspect_ratio",
+                "-of",
+                "json",
+                file_path,
+            ],
             check=True,
             capture_output=True,
             text=True,
@@ -820,9 +831,59 @@ def video_dimensions(file_path):
         streams = json.loads(result.stdout).get("streams") or []
         if not streams:
             return None, None
-        return streams[0].get("width"), streams[0].get("height")
+        stream = streams[0]
+        width = stream.get("width")
+        height = stream.get("height")
+        display_ratio = stream.get("display_aspect_ratio")
+
+        # Some downloaded streams use non-square pixels. Telegram ignores that
+        # metadata when creating its preview unless we provide display dimensions.
+        if height and display_ratio and display_ratio not in ("0:1", "N/A"):
+            try:
+                ratio_width, ratio_height = (int(value) for value in display_ratio.split(":", 1))
+                if ratio_width > 0 and ratio_height > 0:
+                    display_width = round(height * ratio_width / ratio_height)
+                    return display_width, height
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
+
+        return width, height
     except Exception:
         return None, None
+
+
+def extract_first_frame(file_path):
+    if not shutil.which("ffmpeg"):
+        return None
+    frame_path = os.path.join(DOWNLOAD_DIR, f"first_frame_{uuid.uuid4().hex}.jpg")
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                file_path,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                "-y",
+                frame_path,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        return frame_path if os.path.exists(frame_path) else None
+    except Exception as error:
+        print(f"Could not extract first frame: {error}")
+        try:
+            if os.path.exists(frame_path):
+                os.remove(frame_path)
+        except OSError:
+            pass
+        return None
 
 
 async def send_file(message, file_path, preserve_video_scale=False):
@@ -841,25 +902,27 @@ async def send_file(message, file_path, preserve_video_scale=False):
             return True
 
         if extension in VIDEO_EXTENSIONS:
-            width, height = await asyncio.to_thread(video_dimensions, file_path)
+            frame_path = await asyncio.to_thread(extract_first_frame, file_path)
+            if frame_path:
+                try:
+                    with open(frame_path, "rb") as frame:
+                        await message.reply_photo(
+                            photo=frame,
+                            caption="🖼 First frame",
+                        )
+                finally:
+                    try:
+                        os.remove(frame_path)
+                    except OSError:
+                        pass
 
-            # Portrait videos like Instagram Reels, TikTok, and Facebook Reels can be
-            # resized/cropped by Telegram when sent as normal videos. Sending them as
-            # documents preserves the original size, quality, and aspect ratio.
-            is_portrait = bool(width and height and height > width)
-            if preserve_video_scale or is_portrait:
-                await message.reply_document(
-                    document=media,
-                    filename=os.path.basename(file_path),
-                )
-                return True
-
-            video_options = {"video": media, "supports_streaming": True}
-            if width and height:
-                video_options["width"] = width
-                video_options["height"] = height
-
-            await message.reply_video(**video_options)
+            # Sending every video as a document preserves the source quality,
+            # dimensions, and aspect ratio without Telegram recompression.
+            await message.reply_document(
+                document=media,
+                filename=os.path.basename(file_path),
+                caption="📁 Original video file",
+            )
             return True
 
         await message.reply_document(
