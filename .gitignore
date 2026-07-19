@@ -1,4 +1,9 @@
 __pycache__/
+*.py[cod]
+.env
 bot.db
+bot.db-shm
+bot.db-wal
 downloads/
-youtube_cookies.txt
+cookies.txt
+*_cookies.txt
