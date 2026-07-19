@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import os
@@ -7,7 +8,7 @@ import sqlite3
 import subprocess
 import uuid
 from datetime import UTC, datetime, timedelta
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 import yt_dlp
@@ -32,7 +33,7 @@ REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()  # Example: @YourCh
 SPONSOR_TEXT = os.getenv("SPONSOR_TEXT", "").strip()
 ERROR_GROUP_ID = os.getenv("ERROR_GROUP_ID", "").strip()  # Example: -1001234567890 or @your_error_group
 
-DB_PATH = "bot.db"
+DB_PATH = os.getenv("DB_PATH", "bot.db")
 DOWNLOAD_DIR = "downloads"
 SHARE_INTERVAL = timedelta(days=5)
 FREE_DAILY_LIMIT = int(os.getenv("FREE_DAILY_LIMIT", "20"))
@@ -45,8 +46,21 @@ TIKWM_API_URL = "https://www.tikwm.com/api/"
 DEFAULT_COOKIES_FILE = "cookies.txt"
 RUNTIME_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "youtube_cookies.txt")
 RUNTIME_INSTAGRAM_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "instagram_cookies.txt")
+SUPPORTED_HOST_SUFFIXES = (
+    "tiktok.com",
+    "instagram.com",
+    "facebook.com",
+    "fb.watch",
+    "youtu.be",
+    "youtube.com",
+    "youtube-nocookie.com",
+    "x.com",
+    "twitter.com",
+)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+db_directory = os.path.dirname(os.path.abspath(DB_PATH))
+os.makedirs(db_directory, exist_ok=True)
 
 
 def utc_now():
@@ -62,7 +76,10 @@ def is_owner(user_id):
 
 
 def db_connect():
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
 
 
 def init_db():
@@ -116,6 +133,8 @@ def ensure_columns(conn):
         conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
     if "joined_at" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN joined_at TEXT NOT NULL DEFAULT ''")
+    if "share_referral_checkpoint" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN share_referral_checkpoint INTEGER NOT NULL DEFAULT 0")
 
 
 def register_user(user, referrer_id=None):
@@ -214,7 +233,23 @@ def should_share(user_id):
 
 def mark_shared(user_id):
     with db_connect() as conn:
-        conn.execute("UPDATE users SET last_shared_at = ? WHERE user_id = ?", (utc_now().isoformat(), user_id))
+        conn.execute(
+            """
+            UPDATE users
+            SET last_shared_at = ?, share_referral_checkpoint = referral_count
+            WHERE user_id = ?
+            """,
+            (utc_now().isoformat(), user_id),
+        )
+
+
+def has_new_referral(user_id):
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT referral_count, share_referral_checkpoint FROM users WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    return bool(row and row[0] > row[1])
 
 
 def platform_name(url):
@@ -230,6 +265,22 @@ def platform_name(url):
     if "x.com" in lowered or "twitter" in lowered:
         return "X/Twitter"
     return "Other"
+
+
+def url_host(url):
+    return (urlparse(url).hostname or "").lower().rstrip(".")
+
+
+def host_matches(host, domain):
+    return host == domain or host.endswith(f".{domain}")
+
+
+def is_supported_url(url):
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = url_host(url)
+    return any(host_matches(host, domain) for domain in SUPPORTED_HOST_SUFFIXES)
 
 
 def main_menu():
@@ -386,43 +437,58 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def parse_admin_user_id(update, context, usage):
+    if not context.args:
+        await update.message.reply_text(f"Use: {usage}")
+        return None
+    try:
+        user_id = int(context.args[0])
+    except (TypeError, ValueError):
+        await update.message.reply_text(f"Invalid user ID. Use: {usage}")
+        return None
+    if user_id <= 0:
+        await update.message.reply_text("User ID must be a positive number.")
+        return None
+    return user_id
+
+
 async def vip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         return
-    if not context.args:
-        await update.message.reply_text("Use: /vip user_id")
+    user_id = await parse_admin_user_id(update, context, "/vip user_id")
+    if user_id is None:
         return
-    set_vip(int(context.args[0]), True)
+    set_vip(user_id, True)
     await update.message.reply_text("✅ VIP added.")
 
 
 async def unvip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         return
-    if not context.args:
-        await update.message.reply_text("Use: /unvip user_id")
+    user_id = await parse_admin_user_id(update, context, "/unvip user_id")
+    if user_id is None:
         return
-    set_vip(int(context.args[0]), False)
+    set_vip(user_id, False)
     await update.message.reply_text("✅ VIP removed.")
 
 
 async def ban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         return
-    if not context.args:
-        await update.message.reply_text("Use: /ban user_id")
+    user_id = await parse_admin_user_id(update, context, "/ban user_id")
+    if user_id is None:
         return
-    set_ban(int(context.args[0]), True)
+    set_ban(user_id, True)
     await update.message.reply_text("🚫 User banned.")
 
 
 async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         return
-    if not context.args:
-        await update.message.reply_text("Use: /unban user_id")
+    user_id = await parse_admin_user_id(update, context, "/unban user_id")
+    if user_id is None:
         return
-    set_ban(int(context.args[0]), False)
+    set_ban(user_id, False)
     await update.message.reply_text("✅ User unbanned.")
 
 
@@ -443,6 +509,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent += 1
         except Exception:
             failed += 1
+        await asyncio.sleep(0.05)
     with db_connect() as conn:
         conn.execute(
             "INSERT INTO broadcasts (admin_id, message, sent_count, failed_count, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -458,10 +525,10 @@ async def send_share_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     share_url = f"tg://msg_url?url={quote(invite_link)}&text={quote(share_text)}"
     context.user_data["pending_download_url"] = url
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Share to 1 person", url=share_url)], [InlineKeyboardButton("Done after sharing", callback_data="share_done")]]
+        [[InlineKeyboardButton("Invite 1 friend", url=share_url)], [InlineKeyboardButton("Check invitation", callback_data="share_done")]]
     )
     await update.message.reply_text(
-        "Every 5 days, share your invite link with 1 person to keep downloading.",
+        "To continue, invite one new friend with your personal link. After they start the bot, press Check invitation.",
         reply_markup=keyboard,
     )
 
@@ -483,6 +550,9 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please send a valid video link.")
         return
     url = urls[0].strip()
+    if not is_supported_url(url):
+        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only.")
+        return
     if should_share(update.effective_user.id):
         await send_share_prompt(update, context, url)
         return
@@ -510,6 +580,9 @@ async def mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Use: /mp3 https://youtube.com/...")
         return
     url = urls[0].strip()
+    if not is_supported_url(url):
+        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only.")
+        return
     success = await send_download(update.message, url, context=context, kind="mp3")
     if success:
         log_download(update.effective_user.id, url, "mp3")
@@ -573,19 +646,21 @@ INSTAGRAM_COOKIES_FILE = prepare_instagram_cookies_file()
 
 
 def is_tiktok_url(url):
-    return any(domain in url.lower() for domain in ("tiktok.com", "vt.tiktok.com", "vm.tiktok.com"))
+    return host_matches(url_host(url), "tiktok.com")
 
 
 def is_facebook_url(url):
-    return any(domain in url.lower() for domain in ("facebook.com", "fb.watch", "fb.com", "m.facebook.com"))
+    host = url_host(url)
+    return host_matches(host, "facebook.com") or host_matches(host, "fb.watch")
 
 
 def is_youtube_url(url):
-    return any(domain in url.lower() for domain in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
+    host = url_host(url)
+    return any(host_matches(host, domain) for domain in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
 
 
 def is_instagram_url(url):
-    return "instagram.com" in url.lower()
+    return host_matches(url_host(url), "instagram.com")
 
 
 def instagram_cookie_error(error):
@@ -754,7 +829,7 @@ async def send_file(message, file_path, preserve_video_scale=False):
             return True
 
         if extension in VIDEO_EXTENSIONS:
-            width, height = video_dimensions(file_path)
+            width, height = await asyncio.to_thread(video_dimensions, file_path)
 
             # Portrait videos like Instagram Reels, TikTok, and Facebook Reels can be
             # resized/cropped by Telegram when sent as normal videos. Sending them as
@@ -833,7 +908,7 @@ async def send_download(message, url, context=None, kind="video"):
     await message.reply_text("Downloading... ⏳")
     try:
         before_files = {os.path.join(DOWNLOAD_DIR, file_name) for file_name in os.listdir(DOWNLOAD_DIR)}
-        file_path = download_with_yt_dlp(url, ydl_options(url, kind=kind))
+        file_path = await asyncio.to_thread(download_with_yt_dlp, url, ydl_options(url, kind=kind))
         files_to_send = downloaded_files(before_files, file_path)
         cleanup_files = list(files_to_send)
         if not files_to_send:
@@ -845,7 +920,7 @@ async def send_download(message, url, context=None, kind="video"):
     except Exception as error:
         if is_tiktok_url(url) and kind == "video":
             try:
-                files_to_send = download_tiktok_api(url)
+                files_to_send = await asyncio.to_thread(download_tiktok_api, url)
                 cleanup_files = list(files_to_send)
                 if files_to_send:
                     sent_any = False
@@ -853,12 +928,19 @@ async def send_download(message, url, context=None, kind="video"):
                         sent_any = await send_file(message, path) or sent_any
                     return sent_any
             except Exception as fallback_error:
-                await message.reply_text(f"TikTok error:\n{fallback_error}")
+                await report_download_error(context, message, url, fallback_error, kind)
+                await send_clean_error(message)
                 return False
+        if is_instagram_url(url) and instagram_cookie_error(error):
+            await report_download_error(context, message, url, error, kind)
+            await message.reply_text(instagram_cookie_message())
+            return False
         if is_youtube_url(url) and youtube_cookie_error(error):
+            await report_download_error(context, message, url, error, kind)
             await message.reply_text(youtube_cookie_message())
             return False
-        await message.reply_text(f"Error:\n{error}")
+        await report_download_error(context, message, url, error, kind)
+        await send_clean_error(message)
         return False
     finally:
         for path in set(cleanup_files):
@@ -872,6 +954,11 @@ async def send_download(message, url, context=None, kind="video"):
 async def share_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not has_new_referral(update.effective_user.id):
+        await query.message.reply_text(
+            "No new invitation was found yet. Your friend must open your link and press Start, then check again."
+        )
+        return
     mark_shared(update.effective_user.id)
     url = context.user_data.pop("pending_download_url", None)
     if not url:
