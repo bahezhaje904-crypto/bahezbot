@@ -751,6 +751,18 @@ def ydl_options(url, kind="video"):
     return options
 
 
+def instagram_retry_options(url, kind="video", use_cookies=True):
+    options = ydl_options(url, kind=kind)
+    if kind == "video":
+        # Instagram often exposes a ready-to-send combined MP4 even when its
+        # separate video/audio formats cannot be merged on a hosted server.
+        options["format"] = "best[ext=mp4]/best"
+        options.pop("merge_output_format", None)
+    if not use_cookies:
+        options.pop("cookiefile", None)
+    return options
+
+
 def download_with_yt_dlp(url, options):
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -918,6 +930,7 @@ async def send_download(message, url, context=None, kind="video"):
             sent_any = await send_file(message, path, preserve_video_scale=preserve_video_scale) or sent_any
         return sent_any
     except Exception as error:
+        print(f"Primary {platform_name(url)} {kind} download failed: {error}")
         if is_tiktok_url(url) and kind == "video":
             try:
                 files_to_send = await asyncio.to_thread(download_tiktok_api, url)
@@ -928,9 +941,48 @@ async def send_download(message, url, context=None, kind="video"):
                         sent_any = await send_file(message, path) or sent_any
                     return sent_any
             except Exception as fallback_error:
+                print(f"TikTok fallback failed: {fallback_error}")
                 await report_download_error(context, message, url, fallback_error, kind)
                 await send_clean_error(message)
                 return False
+        if is_instagram_url(url):
+            retry_errors = [error]
+            for use_cookies in (True, False):
+                try:
+                    retry_before = {
+                        os.path.join(DOWNLOAD_DIR, file_name)
+                        for file_name in os.listdir(DOWNLOAD_DIR)
+                    }
+                    retry_path = await asyncio.to_thread(
+                        download_with_yt_dlp,
+                        url,
+                        instagram_retry_options(url, kind=kind, use_cookies=use_cookies),
+                    )
+                    files_to_send = downloaded_files(retry_before, retry_path)
+                    cleanup_files.extend(files_to_send)
+                    if not files_to_send:
+                        raise RuntimeError("Instagram retry finished without a media file.")
+                    sent_any = False
+                    for path in files_to_send:
+                        sent_any = await send_file(
+                            message,
+                            path,
+                            preserve_video_scale=True,
+                        ) or sent_any
+                    if sent_any:
+                        return True
+                except Exception as retry_error:
+                    retry_errors.append(retry_error)
+                    mode = "cookies" if use_cookies else "no cookies"
+                    print(f"Instagram retry ({mode}) failed: {retry_error}")
+
+            final_error = retry_errors[-1]
+            await report_download_error(context, message, url, final_error, kind)
+            if instagram_cookie_error(final_error):
+                await message.reply_text(instagram_cookie_message())
+            else:
+                await send_clean_error(message)
+            return False
         if is_instagram_url(url) and instagram_cookie_error(error):
             await report_download_error(context, message, url, error, kind)
             await message.reply_text(instagram_cookie_message())
