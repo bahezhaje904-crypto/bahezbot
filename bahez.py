@@ -766,7 +766,10 @@ def instagram_retry_options(url, kind="video", use_cookies=True):
 def download_with_yt_dlp(url, options):
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info)
+        return {
+            "file_path": ydl.prepare_filename(info),
+            "thumbnail_url": info.get("thumbnail"),
+        }
 
 
 def normalize_url(url):
@@ -902,20 +905,6 @@ async def send_file(message, file_path, preserve_video_scale=False):
             return True
 
         if extension in VIDEO_EXTENSIONS:
-            frame_path = await asyncio.to_thread(extract_first_frame, file_path)
-            if frame_path:
-                try:
-                    with open(frame_path, "rb") as frame:
-                        await message.reply_photo(
-                            photo=frame,
-                            caption="🖼 First frame",
-                        )
-                finally:
-                    try:
-                        os.remove(frame_path)
-                    except OSError:
-                        pass
-
             # Sending every video as a document preserves the source quality,
             # dimensions, and aspect ratio without Telegram recompression.
             await message.reply_document(
@@ -930,6 +919,33 @@ async def send_file(message, file_path, preserve_video_scale=False):
             filename=os.path.basename(file_path),
         )
         return True
+
+
+async def send_video_cover(message, thumbnail_url, video_path):
+    if thumbnail_url:
+        try:
+            await message.reply_photo(
+                photo=thumbnail_url,
+                caption="🖼 Video cover",
+            )
+            return
+        except Exception as error:
+            print(f"Could not send source thumbnail: {error}")
+
+    frame_path = await asyncio.to_thread(extract_first_frame, video_path)
+    if not frame_path:
+        return
+    try:
+        with open(frame_path, "rb") as frame:
+            await message.reply_photo(
+                photo=frame,
+                caption="🖼 First frame",
+            )
+    finally:
+        try:
+            os.remove(frame_path)
+        except OSError:
+            pass
 
 
 def short_text(value, limit=2500):
@@ -977,17 +993,27 @@ async def send_clean_error(message):
 async def send_download(message, url, context=None, kind="video"):
     files_to_send = []
     cleanup_files = []
+    thumbnail_url = None
     # Send Instagram and Facebook as documents to preserve the original aspect ratio.
     preserve_video_scale = is_facebook_url(url) or is_instagram_url(url)
     url = normalize_url(url)
     await message.reply_text("Downloading... ⏳")
     try:
         before_files = {os.path.join(DOWNLOAD_DIR, file_name) for file_name in os.listdir(DOWNLOAD_DIR)}
-        file_path = await asyncio.to_thread(download_with_yt_dlp, url, ydl_options(url, kind=kind))
+        download_result = await asyncio.to_thread(download_with_yt_dlp, url, ydl_options(url, kind=kind))
+        file_path = download_result["file_path"]
+        thumbnail_url = download_result.get("thumbnail_url")
         files_to_send = downloaded_files(before_files, file_path)
         cleanup_files = list(files_to_send)
         if not files_to_send:
             raise RuntimeError("Download finished, but no media file was found.")
+        if kind == "video":
+            first_video = next(
+                (path for path in files_to_send if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS),
+                None,
+            )
+            if first_video:
+                await send_video_cover(message, thumbnail_url, first_video)
         sent_any = False
         for path in files_to_send:
             sent_any = await send_file(message, path, preserve_video_scale=preserve_video_scale) or sent_any
@@ -999,6 +1025,16 @@ async def send_download(message, url, context=None, kind="video"):
                 files_to_send = await asyncio.to_thread(download_tiktok_api, url)
                 cleanup_files = list(files_to_send)
                 if files_to_send:
+                    first_video = next(
+                        (
+                            path
+                            for path in files_to_send
+                            if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
+                        ),
+                        None,
+                    )
+                    if first_video:
+                        await send_video_cover(message, None, first_video)
                     sent_any = False
                     for path in files_to_send:
                         sent_any = await send_file(message, path) or sent_any
@@ -1016,15 +1052,28 @@ async def send_download(message, url, context=None, kind="video"):
                         os.path.join(DOWNLOAD_DIR, file_name)
                         for file_name in os.listdir(DOWNLOAD_DIR)
                     }
-                    retry_path = await asyncio.to_thread(
+                    retry_result = await asyncio.to_thread(
                         download_with_yt_dlp,
                         url,
                         instagram_retry_options(url, kind=kind, use_cookies=use_cookies),
                     )
+                    retry_path = retry_result["file_path"]
+                    retry_thumbnail = retry_result.get("thumbnail_url")
                     files_to_send = downloaded_files(retry_before, retry_path)
                     cleanup_files.extend(files_to_send)
                     if not files_to_send:
                         raise RuntimeError("Instagram retry finished without a media file.")
+                    if kind == "video":
+                        first_video = next(
+                            (
+                                path
+                                for path in files_to_send
+                                if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
+                            ),
+                            None,
+                        )
+                        if first_video:
+                            await send_video_cover(message, retry_thumbnail, first_video)
                     sent_any = False
                     for path in files_to_send:
                         sent_any = await send_file(
