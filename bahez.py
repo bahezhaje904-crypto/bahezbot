@@ -531,9 +531,7 @@ async def send_share_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     share_text = "Join this video downloader bot:"
     share_url = f"tg://msg_url?url={quote(invite_link)}&text={quote(share_text)}"
     context.user_data["pending_download_url"] = url
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Invite 1 friend", url=share_url)], [InlineKeyboardButton("Check invitation", callback_data="share_done")]]
-    )
+
     await update.message.reply_text(
         "To continue, invite one new friend with your personal link. After they start the bot, press Check invitation.",
         reply_markup=keyboard,
