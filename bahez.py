@@ -436,7 +436,12 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/ban <user_id> - ban user\n"
         "/unban <user_id> - unban user"
     )
-
+async def groupid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    await update.message.reply_text(
+        f"Chat Name: {chat.title}\n"
+        f"Chat ID: {chat.id}"
+    )
 
 async def parse_admin_user_id(update, context, usage):
     if not context.args:
