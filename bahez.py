@@ -62,19 +62,6 @@ SUPPORTED_HOST_SUFFIXES = (
 
 user = update.effective_user
 
-try:
-    await context.bot.send_message(
-        chat_id=OWNER_ID,  # or "@bahezhaje" if you prefer
-        text=(
-            "🆕 New User\n\n"
-            f"👤 Name: {user.full_name}\n"
-            f"📛 Username: @{user.username if user.username else 'None'}\n"
-            f"🆔 User ID: {user.id}"
-        ),
-    )
-except Exception as e:
-    print(f"Failed to notify owner: {e}")
-
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 db_directory = os.path.dirname(os.path.abspath(DB_PATH))
 os.makedirs(db_directory, exist_ok=True)
@@ -325,6 +312,10 @@ async def check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return False
 
 
+
+
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     referrer_id = None
     if context.args and context.args[0].startswith("ref_"):
@@ -332,8 +323,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             referrer_id = int(context.args[0].replace("ref_", "", 1))
         except ValueError:
             referrer_id = None
+
     register_user(update.effective_user, referrer_id)
+
+    # Notify owner about the user
+    user = update.effective_user
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_ID,
+            text=(
+                "🆕 New User Started the Bot\n\n"
+                f"👤 Name: {user.full_name}\n"
+                f"📛 Username: @{user.username if user.username else 'None'}\n"
+                f"🆔 User ID: {user.id}"
+            ),
+        )
+    except Exception as e:
+        print(f"Failed to notify owner: {e}")
+
     total = count_users()
+
     await update.message.reply_text(
         "👋 Welcome to Bahez Video Downloader\n\n"
         f"👥 Subscribers: {total}\n\n"
