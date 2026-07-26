@@ -690,9 +690,17 @@ def instagram_cookie_error(error):
 
 def instagram_cookie_message():
     return (
-        "Instagram did not allow the server to access this Reel.\n\n"
-        "Make sure Railway Variables has INSTAGRAM_COOKIES_TEXT, then Redeploy. "
-        "If it still fails, export fresh Instagram cookies while logged in and replace the old value."
+await send_admin_error(
+    context,
+    message.from_user,
+    url,
+    error,
+)
+
+await message.reply_text(
+    "❌ هەڵەیەک ڕوویدا.\n"
+    "تکایە دواتر هەوڵ بدەوە."
+)
     )
 
 def youtube_cookie_error(error):
