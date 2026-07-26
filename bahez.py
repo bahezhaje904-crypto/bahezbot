@@ -985,10 +985,7 @@ async def report_download_error(context, message, url, error, kind="video"):
 
 
 async def send_clean_error(message):
-    await message.reply_text(
-        "❌ Sorry, we couldn't download this video.\n"
-        "Please try another public link or try again later."
-    )
+    await message.reply_text(USER_ERROR_MESSAGE)
 
 
 async def send_download(message, url, context=None, kind="video"):
