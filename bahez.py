@@ -60,7 +60,6 @@ SUPPORTED_HOST_SUFFIXES = (
     "twitter.com",
 )
 
-user = update.effective_user
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 db_directory = os.path.dirname(os.path.abspath(DB_PATH))
@@ -143,32 +142,53 @@ def ensure_columns(conn):
 
 def register_user(user, referrer_id=None):
     now = utc_now().isoformat()
+
     with db_connect() as conn:
-        existing = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (user.id,)).fetchone()
+        existing = conn.execute(
+            "SELECT user_id FROM users WHERE user_id = ?",
+            (user.id,),
+        ).fetchone()
+
         if existing:
             conn.execute(
                 "UPDATE users SET first_name = ?, username = ? WHERE user_id = ?",
                 (user.first_name, user.username, user.id),
             )
-            return
+            return False
 
         if referrer_id == user.id:
             referrer_id = None
 
         valid_referrer = None
         if referrer_id:
-            valid_referrer = conn.execute("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,)).fetchone()
+            valid_referrer = conn.execute(
+                "SELECT user_id FROM users WHERE user_id = ?",
+                (referrer_id,),
+            ).fetchone()
 
         conn.execute(
             """
-            INSERT INTO users (user_id, first_name, username, referrer_id, last_shared_at, joined_at)
+            INSERT INTO users
+            (user_id, first_name, username, referrer_id, last_shared_at, joined_at)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (user.id, user.first_name, user.username, referrer_id if valid_referrer else None, now, now),
+            (
+                user.id,
+                user.first_name,
+                user.username,
+                referrer_id if valid_referrer else None,
+                now,
+                now,
+            ),
         )
-        if valid_referrer:
-            conn.execute("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?", (referrer_id,))
 
+        if valid_referrer:
+            conn.execute(
+                "UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?",
+                (referrer_id,),
+            )
+
+    return True
 
 def user_row(user_id):
     with db_connect() as conn:
