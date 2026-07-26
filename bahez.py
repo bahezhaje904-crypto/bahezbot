@@ -537,30 +537,35 @@ async def send_share_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         reply_markup=keyboard,
     )
 
-
 async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
     if is_banned(update.effective_user.id):
         await update.message.reply_text("🚫 You are banned from using this bot.")
         return
+
     if not await check_channel(update, context):
         return
+
     ok, limit = can_download(update.effective_user.id)
     if not ok:
-        await update.message.reply_text(f"Daily limit reached ({limit}). Upgrade to VIP for unlimited downloads.")
+        await update.message.reply_text(
+            f"Daily limit reached ({limit}). Upgrade to VIP for unlimited downloads."
+        )
         return
+
     text = update.message.text or ""
     urls = re.findall(r"https?://[^\s]+", text)
     if not urls:
         await update.message.reply_text("Please send a valid video link.")
         return
+
     url = urls[0].strip()
     if not is_supported_url(url):
-        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only.")
+        await update.message.reply_text(
+            "Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only."
+        )
         return
-    if should_share(update.effective_user.id):
-        await send_share_prompt(update, context, url)
-        return
+
     success = await send_download(update.message, url, context=context, kind="video")
     if success:
         log_download(update.effective_user.id, url, "video")
