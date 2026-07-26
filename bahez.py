@@ -24,6 +24,7 @@ from telegram.ext import (
     filters,
 )
 
+
 TOKEN = os.getenv("TOKEN")
 if not TOKEN:
     raise RuntimeError("Missing TOKEN environment variable. Add TOKEN in Railway Variables.")
