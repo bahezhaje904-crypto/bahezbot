@@ -1182,10 +1182,12 @@ def main():
     app.add_handler(CallbackQueryHandler(share_done, pattern="^share_done$"))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download))
+    app.add_handler(CommandHandler("groupid", groupid))
     app.add_error_handler(handle_error)
     print("BahezBot v3 running...")
     app.run_polling(drop_pending_updates=True)
-app.add_handler(CommandHandler("groupid", groupid))
+    
+
 
 if __name__ == "__main__":
     main()
