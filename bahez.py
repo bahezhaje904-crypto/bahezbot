@@ -1184,7 +1184,7 @@ def main():
     app.add_error_handler(handle_error)
     print("BahezBot v3 running...")
     app.run_polling(drop_pending_updates=True)
-
+app.add_handler(CommandHandler("groupid", groupid))
 
 if __name__ == "__main__":
     main()
