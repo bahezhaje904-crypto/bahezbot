@@ -60,6 +60,21 @@ SUPPORTED_HOST_SUFFIXES = (
     "twitter.com",
 )
 
+user = update.effective_user
+
+try:
+    await context.bot.send_message(
+        chat_id=OWNER_ID,  # or "@bahezhaje" if you prefer
+        text=(
+            "🆕 New User\n\n"
+            f"👤 Name: {user.full_name}\n"
+            f"📛 Username: @{user.username if user.username else 'None'}\n"
+            f"🆔 User ID: {user.id}"
+        ),
+    )
+except Exception as e:
+    print(f"Failed to notify owner: {e}")
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 db_directory = os.path.dirname(os.path.abspath(DB_PATH))
 os.makedirs(db_directory, exist_ok=True)
