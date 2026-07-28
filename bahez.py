@@ -764,7 +764,7 @@ def downloaded_files(before_files, prepared_file_path):
 
 def ydl_options(url, kind="video"):
     unique_name = f"%(extractor)s_%(id)s_{uuid.uuid4().hex[:8]}.%(ext)s"
-    options = {
+options = {
     "outtmpl": os.path.join(DOWNLOAD_DIR, unique_name),
     "format": "bv*+ba/b",
     "merge_output_format": "mp4",
@@ -772,7 +772,7 @@ def ydl_options(url, kind="video"):
     "no_warnings": True,
     "noplaylist": True,
     "retries": 3,
-    ...
+    # your existing lines continue here
 }
     if kind == "mp3":
         options.update(
