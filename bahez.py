@@ -795,7 +795,8 @@ def ydl_options(url, kind="video"):
             options["format"] = "bv*+ba/b"
             options["merge_output_format"] = "mp4"
         else:
-            options["format"] = "best[ext=mp4][height<=720]/best[height<=720]/best[ext=mp4]/best"
+            options["format"] = "bv*+ba/b"
+            options["merge_output_format"] = "mp4"
     if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
