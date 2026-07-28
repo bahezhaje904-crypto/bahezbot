@@ -764,21 +764,28 @@ def downloaded_files(before_files, prepared_file_path):
 
 def ydl_options(url, kind="video"):
     unique_name = f"%(extractor)s_%(id)s_{uuid.uuid4().hex[:8]}.%(ext)s"
-options = {
-    "outtmpl": os.path.join(DOWNLOAD_DIR, unique_name),
-    "format": "bv*+ba/b",
-    "merge_output_format": "mp4",
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "retries": 3,
-    # your existing lines continue here
-}
+
+    options = {
+        "outtmpl": os.path.join(DOWNLOAD_DIR, unique_name),
+        "format": "bv*+ba/b",
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "retries": 3,
+    }
+
     if kind == "mp3":
         options.update(
             {
                 "format": "bestaudio/best",
-                "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }
+                ],
             }
         )
     else:
