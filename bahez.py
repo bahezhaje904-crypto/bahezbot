@@ -1151,12 +1151,25 @@ async def send_file(message, file_path, preserve_video_scale=False):
             return True
 
         if extension in VIDEO_EXTENSIONS:
-            # Sending every video as a document preserves the source quality,
-            # dimensions, and aspect ratio without Telegram recompression.
+            # Telegram's video player supports MP4; send other containers as files.
+            # This avoids animation-style previews for regular MP4 videos.
+            if extension == ".mp4":
+                try:
+                    await message.reply_video(
+                        video=media,
+                        supports_streaming=True,
+                        caption="📁 ڤیدیۆکە بە فول کوالیتی 🔥 ",
+                        filename=os.path.basename(file_path),
+                    )
+                    return True
+                except (BadRequest, TimedOut, NetworkError) as error:
+                    print(f"Telegram video upload failed; trying document: {type(error).__name__}")
+                    media.seek(0)
             await message.reply_document(
                 document=media,
                 filename=os.path.basename(file_path),
                 caption="📁 ڤیدیۆکە بە فول کوالیتی 🔥 ",
+                disable_content_type_detection=True,
             )
             return True
 
