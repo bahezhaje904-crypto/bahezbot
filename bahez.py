@@ -334,7 +334,7 @@ def group_join_keyboard():
 
 
 async def membership_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check every user action before any command, download or callback runs."""
+    """Require membership in private chat; keep group activity silent."""
     if not REQUIRED_GROUP_ID or not update.effective_user or not update.effective_message:
         return
     text = update.effective_message.text or ""
@@ -342,6 +342,12 @@ async def membership_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Keep the diagnostic command usable even if membership is misconfigured.
     if update.message and command == "/groupid":
         return
+    # Verification and bot features belong in private chat. Stop group
+    # service messages, commands and old buttons before other handlers run.
+    if not update.effective_chat or update.effective_chat.type != "private":
+        if update.callback_query:
+            await update.callback_query.answer()
+        raise ApplicationHandlerStop
     query = update.callback_query
     if query and query.data == "check_group_join":
         await query.answer()
