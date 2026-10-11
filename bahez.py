@@ -853,8 +853,39 @@ def instagram_retry_options(url, kind="video", use_cookies=True):
     return options
 
 
+def log_snapchat_formats(url, options):
+    # Metadata-only inspection; do not download or modify the media.
+    inspect_options = options.copy()
+    inspect_options["skip_download"] = True
+    inspect_options["ignore_no_formats_error"] = True
+    inspect_options["quiet"] = True
+    try:
+        with yt_dlp.YoutubeDL(inspect_options) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+        formats = info.get("formats") or []
+        # Avoid logging signed media URLs, cookies, or other secrets.
+        summary = [
+            {
+                "format_id": str(fmt.get("format_id", ""))[:80],
+                "ext": fmt.get("ext"),
+                "width": fmt.get("width"),
+                "height": fmt.get("height"),
+                "vcodec": fmt.get("vcodec"),
+                "acodec": fmt.get("acodec"),
+            }
+            for fmt in formats[:25]
+        ]
+        print(f"Snapchat available format metadata: {summary}")
+        if not formats:
+            print("Snapchat extractor returned no alternate formats.")
+    except Exception as error:
+        print(f"Snapchat format inspection unavailable: {type(error).__name__}")
+
+
 def download_with_yt_dlp(url, options):
     attempts = [options]
+    if is_snapchat_url(url) and os.getenv("SNAPCHAT_INSPECT_FORMATS", "0") == "1":
+        log_snapchat_formats(url, options)
     if is_facebook_url(url):
         parsed = urlparse(url)
         params = parse_qs(parsed.query)
