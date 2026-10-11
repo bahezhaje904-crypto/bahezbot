@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import uuid
 from datetime import UTC, datetime, timedelta
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, parse_qs, urlencode, urlunparse
 
 import requests
 import yt_dlp
@@ -48,11 +48,14 @@ TIKWM_API_URL = "https://www.tikwm.com/api/"
 DEFAULT_COOKIES_FILE = "cookies.txt"
 RUNTIME_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "youtube_cookies.txt")
 RUNTIME_INSTAGRAM_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "instagram_cookies.txt")
+RUNTIME_FACEBOOK_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "facebook_cookies.txt")
+RUNTIME_SNAPCHAT_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "snapchat_cookies.txt")
 SUPPORTED_HOST_SUFFIXES = (
     "tiktok.com",
     "instagram.com",
     "facebook.com",
     "fb.watch",
+    "snapchat.com",
     "youtu.be",
     "youtube.com",
     "youtube-nocookie.com",
@@ -366,7 +369,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to Bahez Video Downloader\n\n"
         f"👥 Subscribers: {total}\n\n"
-        "Send a TikTok, Instagram, Facebook, YouTube, or X link.\n\n"
+        "Send a TikTok, Instagram, Facebook, Snapchat, YouTube, or X link.\n\n"
         "Commands:\n"
         "/mp3 <link> - download audio\n"
         "/top - top inviters\n"
@@ -606,7 +609,7 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = urls[0].strip()
     if not is_supported_url(url):
         await update.message.reply_text(
-            "Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only."
+            "Unsupported link. Send TikTok, Instagram, Facebook, Snapchat, YouTube, or X only."
         )
         return
 
@@ -635,7 +638,7 @@ async def mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     url = urls[0].strip()
     if not is_supported_url(url):
-        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only.")
+        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, Snapchat, YouTube, or X only.")
         return
     success = await send_download(update.message, url, context=context, kind="mp3")
     if success:
@@ -695,12 +698,41 @@ def prepare_instagram_cookies_file():
     return None
 
 
+def prepare_facebook_cookies_file():
+    facebook_cookie_file = write_cookies_from_env(
+        "FACEBOOK_COOKIES_TEXT",
+        "FACEBOOK_COOKIES_B64",
+        RUNTIME_FACEBOOK_COOKIES_FILE,
+    )
+    if facebook_cookie_file:
+        return facebook_cookie_file
+    custom_file = os.getenv("FACEBOOK_COOKIES_FILE")
+    if custom_file:
+        return custom_file
+    return None
+
+
+def prepare_snapchat_cookies_file():
+    cookie_file = write_cookies_from_env(
+        "SNAPCHAT_COOKIES_TEXT",
+        "SNAPCHAT_COOKIES_B64",
+        RUNTIME_SNAPCHAT_COOKIES_FILE,
+    )
+    return cookie_file or os.getenv("SNAPCHAT_COOKIES_FILE") or None
+
+
 COOKIES_FILE = prepare_cookies_file()
 INSTAGRAM_COOKIES_FILE = prepare_instagram_cookies_file()
+FACEBOOK_COOKIES_FILE = prepare_facebook_cookies_file()
+SNAPCHAT_COOKIES_FILE = prepare_snapchat_cookies_file()
 
 
 def is_tiktok_url(url):
     return host_matches(url_host(url), "tiktok.com")
+
+
+def is_snapchat_url(url):
+    return host_matches(url_host(url), "snapchat.com")
 
 
 def is_facebook_url(url):
@@ -797,7 +829,11 @@ def ydl_options(url, kind="video"):
         else:
             options["format"] = "bv*+ba/b"
             options["merge_output_format"] = "mp4"
-    if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
+    if is_snapchat_url(url) and SNAPCHAT_COOKIES_FILE and os.path.exists(SNAPCHAT_COOKIES_FILE):
+        options["cookiefile"] = SNAPCHAT_COOKIES_FILE
+    elif is_facebook_url(url) and FACEBOOK_COOKIES_FILE and os.path.exists(FACEBOOK_COOKIES_FILE):
+        options["cookiefile"] = FACEBOOK_COOKIES_FILE
+    elif is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
         options["cookiefile"] = COOKIES_FILE
@@ -805,8 +841,16 @@ def ydl_options(url, kind="video"):
     if is_instagram_url(url):
         options["extractor_args"] = {"instagram": {"app_id": ["936619743392459"]}}
 
+    if is_facebook_url(url):
+        options["http_headers"] = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
     if is_youtube_url(url):
-        options["extractor_args"] = {"youtube": {"player_client": ["default", "ios", "web_safari", "mweb"]}}
+        # Let current yt-dlp choose supported default clients first.
+        # Forced older clients may return video URLs that fail with HTTP 403.
+        options["extractor_args"] = {"youtube": {"player_client": ["default"]}}
     return options
 
 
@@ -822,17 +866,160 @@ def instagram_retry_options(url, kind="video", use_cookies=True):
     return options
 
 
+def log_snapchat_formats(url, options):
+    # Metadata-only inspection; do not download or modify the media.
+    inspect_options = options.copy()
+    inspect_options["skip_download"] = True
+    inspect_options["ignore_no_formats_error"] = True
+    inspect_options["quiet"] = True
+    try:
+        with yt_dlp.YoutubeDL(inspect_options) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+        formats = info.get("formats") or []
+        # Avoid logging signed media URLs, cookies, or other secrets.
+        summary = [
+            {
+                "format_id": str(fmt.get("format_id", ""))[:80],
+                "ext": fmt.get("ext"),
+                "width": fmt.get("width"),
+                "height": fmt.get("height"),
+                "vcodec": fmt.get("vcodec"),
+                "acodec": fmt.get("acodec"),
+            }
+            for fmt in formats[:25]
+        ]
+        print(f"Snapchat available format metadata: {summary}")
+        if not formats:
+            print("Snapchat extractor returned no alternate formats.")
+    except Exception as error:
+        print(f"Snapchat format inspection unavailable: {type(error).__name__}")
+
+
+def snapchat_clean_source(url):
+    """Find the public Spotlight media URL in Snapchat page data, if exposed."""
+    response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    response.raise_for_status()
+    # Public Spotlight pages include structured JSON with snapList/mediaUrl.
+    scripts = re.findall(
+        r'<script[^>]*type=["\\\']application/json["\\\'][^>]*>(.*?)</script>',
+        response.text, flags=re.I | re.S,
+    )
+    scripts += re.findall(
+        r'<script[^>]*id=["\\\']__NEXT_DATA__["\\\'][^>]*>(.*?)</script>',
+        response.text, flags=re.I | re.S,
+    )
+    def find_media(node):
+        if isinstance(node, dict):
+            snap_list = node.get("snapList")
+            if isinstance(snap_list, list):
+                for snap in snap_list:
+                    if isinstance(snap, dict) and isinstance(snap.get("mediaUrl"), str):
+                        yield snap["mediaUrl"]
+            metadata = node.get("videoMetadata")
+            if isinstance(metadata, dict) and isinstance(metadata.get("contentUrl"), str):
+                yield metadata["contentUrl"]
+            for value in node.values():
+                yield from find_media(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from find_media(value)
+    for script in scripts:
+        try:
+            data = json.loads(script)
+        except (ValueError, TypeError):
+            continue
+        for media in find_media(data):
+            parsed = urlparse(media)
+            # Only accept Snapchat-hosted HTTPS video links.
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme == "https" and (
+                host == "sc-cdn.net" or host.endswith(".sc-cdn.net")
+                or host == "snapchat.com" or host.endswith(".snapchat.com")
+            ):
+                return media
+    return None
+
+
 def download_with_yt_dlp(url, options):
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return {
-            "file_path": ydl.prepare_filename(info),
-            "thumbnail_url": info.get("thumbnail"),
-        }
+    attempts = [options]
+    if is_snapchat_url(url) and os.getenv("SNAPCHAT_CLEAN_SOURCE", "0") == "1":
+        try:
+            clean_url = snapchat_clean_source(url)
+            if clean_url:
+                clean_opts = options.copy()
+                clean_opts["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_snapclean.%(ext)s")
+                clean_opts["_snapchat_direct_url"] = clean_url
+                attempts.insert(0, clean_opts)
+                print("Snapchat public page media source found; trying it first.")
+            else:
+                print("Snapchat public page did not expose a separate media source.")
+        except Exception as error:
+            print(f"Snapchat public media lookup failed: {type(error).__name__}")
+    if is_snapchat_url(url) and os.getenv("SNAPCHAT_INSPECT_FORMATS", "0") == "1":
+        log_snapchat_formats(url, options)
+    if is_facebook_url(url):
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        # Some public story posts resolve more reliably through the canonical
+        # post permalink than through a story.php share redirect.
+        if parsed.path.rstrip("/") == "/story.php" and params.get("story_fbid"):
+            story_id = params["story_fbid"][0]
+            owner_id = params.get("id", [None])[0]
+            if owner_id and story_id.isdigit() and owner_id.isdigit():
+                fallback = options.copy()
+                fallback["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_fbpost.%(ext)s")
+                fallback["_facebook_retry_url"] = f"https://www.facebook.com/{owner_id}/posts/{story_id}"
+                attempts.append(fallback)
+
+    if is_youtube_url(url):
+        # Only retry an HTTP 403 with alternate YouTube format/client settings.
+        # A fresh extractor instance also avoids reusing an expired media URL.
+        for client, video_format in (
+            ("default", "best[ext=mp4]/best"),
+            ("visionos", "bv*+ba/b"),
+        ):
+            fallback = options.copy()
+            fallback["extractor_args"] = {"youtube": {"player_client": [client]}}
+            fallback["format"] = "bestaudio/best" if options.get("postprocessors") else video_format
+            fallback["outtmpl"] = options["outtmpl"].replace(".%(ext)s", f"_{client}.%(ext)s")
+            attempts.append(fallback)
+
+    for index, attempt in enumerate(attempts):
+        try:
+            current_options = attempt.copy()
+            current_url = current_options.pop("_snapchat_direct_url", current_options.pop("_facebook_retry_url", url))
+            with yt_dlp.YoutubeDL(current_options) as ydl:
+                info = ydl.extract_info(current_url, download=True)
+                return {
+                    "file_path": ydl.prepare_filename(info),
+                    "thumbnail_url": info.get("thumbnail"),
+                }
+        except yt_dlp.utils.DownloadError as error:
+            if is_snapchat_url(url) and index < len(attempts) - 1:
+                print("Snapchat direct media failed; retrying original URL.")
+                continue
+            if is_facebook_url(url) and index < len(attempts) - 1:
+                print("Facebook link failed; retrying canonical public post URL.")
+                continue
+            if not is_youtube_url(url) or "403" not in str(error) or index == len(attempts) - 1:
+                raise
+            print(f"YouTube HTTP 403 on attempt {index + 1}; trying alternate client/format.")
+
 
 
 def normalize_url(url):
-    return url.replace("www.tiktok.com/t/", "www.tiktok.com/")
+    url = url.replace("www.tiktok.com/t/", "www.tiktok.com/")
+    if is_facebook_url(url):
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        # Shared story links contain tracking/redirect parameters that can
+        # trigger Facebook's login flow even for public posts.
+        if parsed.path.rstrip("/") == "/story.php" and params.get("story_fbid"):
+            keep = {key: params[key][0] for key in ("story_fbid", "id") if params.get(key)}
+            return urlunparse(("https", "www.facebook.com", "/story.php", "", urlencode(keep), ""))
+        if parsed.path.rstrip("/") in ("/watch", "/video.php") and params.get("v"):
+            return urlunparse(("https", "www.facebook.com", parsed.path, "", urlencode({"v": params["v"][0]}), ""))
+    return url
 
 
 def download_tiktok_api(url):
@@ -1154,6 +1341,27 @@ async def send_download(message, url, context=None, kind="video"):
         if is_instagram_url(url) and instagram_cookie_error(error):
             await report_download_error(context, message, url, error, kind)
             await message.reply_text(instagram_cookie_message())
+            return False
+        if is_facebook_url(url) and (
+            "facebook.com/login/" in str(error).lower()
+            or "login required" in str(error).lower()
+            or "unsupported url" in str(error).lower()
+        ):
+            await report_download_error(context, message, url, error, kind)
+            await message.reply_text(
+                "Facebook redirected this link to a login page or did not expose a downloadable video. "
+                "Check that the video is public and try its direct video/Reel URL. "
+                "If Facebook still requires sign-in, configure FACEBOOK_COOKIES_TEXT "
+                "in Railway Variables using cookies from an account authorized to view the video."
+            )
+            return False
+        if is_youtube_url(url) and "403" in str(error):
+            await report_download_error(context, message, url, error, kind)
+            await message.reply_text(
+                "YouTube refused the video download (HTTP 403). "
+                "Please try another public link or try again later. "
+                "This is a server/download restriction, not a 24-hour account ban."
+            )
             return False
         if is_youtube_url(url) and youtube_cookie_error(error):
             await report_download_error(context, message, url, error, kind)
