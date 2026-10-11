@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import uuid
 from datetime import UTC, datetime, timedelta
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlparse, parse_qs, urlencode, urlunparse
 
 import requests
 import yt_dlp
@@ -823,6 +823,12 @@ def ydl_options(url, kind="video"):
     if is_instagram_url(url):
         options["extractor_args"] = {"instagram": {"app_id": ["936619743392459"]}}
 
+    if is_facebook_url(url):
+        options["http_headers"] = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
     if is_youtube_url(url):
         # Let current yt-dlp choose supported default clients first.
         # Forced older clients may return video URLs that fail with HTTP 403.
@@ -844,6 +850,20 @@ def instagram_retry_options(url, kind="video", use_cookies=True):
 
 def download_with_yt_dlp(url, options):
     attempts = [options]
+    if is_facebook_url(url):
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        # Some public story posts resolve more reliably through the canonical
+        # post permalink than through a story.php share redirect.
+        if parsed.path.rstrip("/") == "/story.php" and params.get("story_fbid"):
+            story_id = params["story_fbid"][0]
+            owner_id = params.get("id", [None])[0]
+            if owner_id and story_id.isdigit() and owner_id.isdigit():
+                fallback = options.copy()
+                fallback["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_fbpost.%(ext)s")
+                fallback["_facebook_retry_url"] = f"https://www.facebook.com/{owner_id}/posts/{story_id}"
+                attempts.append(fallback)
+
     if is_youtube_url(url):
         # Only retry an HTTP 403 with alternate YouTube format/client settings.
         # A fresh extractor instance also avoids reusing an expired media URL.
@@ -859,13 +879,18 @@ def download_with_yt_dlp(url, options):
 
     for index, attempt in enumerate(attempts):
         try:
-            with yt_dlp.YoutubeDL(attempt) as ydl:
-                info = ydl.extract_info(url, download=True)
+            current_options = attempt.copy()
+            current_url = current_options.pop("_facebook_retry_url", url)
+            with yt_dlp.YoutubeDL(current_options) as ydl:
+                info = ydl.extract_info(current_url, download=True)
                 return {
                     "file_path": ydl.prepare_filename(info),
                     "thumbnail_url": info.get("thumbnail"),
                 }
         except yt_dlp.utils.DownloadError as error:
+            if is_facebook_url(url) and index < len(attempts) - 1:
+                print("Facebook link failed; retrying canonical public post URL.")
+                continue
             if not is_youtube_url(url) or "403" not in str(error) or index == len(attempts) - 1:
                 raise
             print(f"YouTube HTTP 403 on attempt {index + 1}; trying alternate client/format.")
@@ -873,7 +898,18 @@ def download_with_yt_dlp(url, options):
 
 
 def normalize_url(url):
-    return url.replace("www.tiktok.com/t/", "www.tiktok.com/")
+    url = url.replace("www.tiktok.com/t/", "www.tiktok.com/")
+    if is_facebook_url(url):
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        # Shared story links contain tracking/redirect parameters that can
+        # trigger Facebook's login flow even for public posts.
+        if parsed.path.rstrip("/") == "/story.php" and params.get("story_fbid"):
+            keep = {key: params[key][0] for key in ("story_fbid", "id") if params.get(key)}
+            return urlunparse(("https", "www.facebook.com", "/story.php", "", urlencode(keep), ""))
+        if parsed.path.rstrip("/") in ("/watch", "/video.php") and params.get("v"):
+            return urlunparse(("https", "www.facebook.com", parsed.path, "", urlencode({"v": params["v"][0]}), ""))
+    return url
 
 
 def download_tiktok_api(url):
