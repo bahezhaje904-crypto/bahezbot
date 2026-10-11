@@ -882,8 +882,66 @@ def log_snapchat_formats(url, options):
         print(f"Snapchat format inspection unavailable: {type(error).__name__}")
 
 
+def snapchat_clean_source(url):
+    """Find the public Spotlight media URL in Snapchat page data, if exposed."""
+    response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    response.raise_for_status()
+    # Public Spotlight pages include structured JSON with snapList/mediaUrl.
+    scripts = re.findall(
+        r'<script[^>]*type=["\\\']application/json["\\\'][^>]*>(.*?)</script>',
+        response.text, flags=re.I | re.S,
+    )
+    scripts += re.findall(
+        r'<script[^>]*id=["\\\']__NEXT_DATA__["\\\'][^>]*>(.*?)</script>',
+        response.text, flags=re.I | re.S,
+    )
+    def find_media(node):
+        if isinstance(node, dict):
+            snap_list = node.get("snapList")
+            if isinstance(snap_list, list):
+                for snap in snap_list:
+                    if isinstance(snap, dict) and isinstance(snap.get("mediaUrl"), str):
+                        yield snap["mediaUrl"]
+            metadata = node.get("videoMetadata")
+            if isinstance(metadata, dict) and isinstance(metadata.get("contentUrl"), str):
+                yield metadata["contentUrl"]
+            for value in node.values():
+                yield from find_media(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from find_media(value)
+    for script in scripts:
+        try:
+            data = json.loads(script)
+        except (ValueError, TypeError):
+            continue
+        for media in find_media(data):
+            parsed = urlparse(media)
+            # Only accept Snapchat-hosted HTTPS video links.
+            host = (parsed.hostname or "").lower()
+            if parsed.scheme == "https" and (
+                host == "sc-cdn.net" or host.endswith(".sc-cdn.net")
+                or host == "snapchat.com" or host.endswith(".snapchat.com")
+            ):
+                return media
+    return None
+
+
 def download_with_yt_dlp(url, options):
     attempts = [options]
+    if is_snapchat_url(url) and os.getenv("SNAPCHAT_CLEAN_SOURCE", "0") == "1":
+        try:
+            clean_url = snapchat_clean_source(url)
+            if clean_url:
+                clean_opts = options.copy()
+                clean_opts["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_snapclean.%(ext)s")
+                clean_opts["_snapchat_direct_url"] = clean_url
+                attempts.insert(0, clean_opts)
+                print("Snapchat public page media source found; trying it first.")
+            else:
+                print("Snapchat public page did not expose a separate media source.")
+        except Exception as error:
+            print(f"Snapchat public media lookup failed: {type(error).__name__}")
     if is_snapchat_url(url) and os.getenv("SNAPCHAT_INSPECT_FORMATS", "0") == "1":
         log_snapchat_formats(url, options)
     if is_facebook_url(url):
@@ -916,7 +974,7 @@ def download_with_yt_dlp(url, options):
     for index, attempt in enumerate(attempts):
         try:
             current_options = attempt.copy()
-            current_url = current_options.pop("_facebook_retry_url", url)
+            current_url = current_options.pop("_snapchat_direct_url", current_options.pop("_facebook_retry_url", url))
             with yt_dlp.YoutubeDL(current_options) as ydl:
                 info = ydl.extract_info(current_url, download=True)
                 return {
@@ -924,6 +982,9 @@ def download_with_yt_dlp(url, options):
                     "thumbnail_url": info.get("thumbnail"),
                 }
         except yt_dlp.utils.DownloadError as error:
+            if is_snapchat_url(url) and index < len(attempts) - 1:
+                print("Snapchat direct media failed; retrying original URL.")
+                continue
             if is_facebook_url(url) and index < len(attempts) - 1:
                 print("Facebook link failed; retrying canonical public post URL.")
                 continue
