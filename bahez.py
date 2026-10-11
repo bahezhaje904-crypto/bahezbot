@@ -17,6 +17,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, Conflict, Forbidden, NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
+    ApplicationHandlerStop,
+    TypeHandler,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -32,6 +34,8 @@ if not TOKEN:
 # Add your Telegram numeric ID in Railway Variables as OWNER_ID for admin commands.
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "").strip()  # Example: @YourChannel
+REQUIRED_GROUP_ID = os.getenv("REQUIRED_GROUP_ID", "").strip()
+REQUIRED_GROUP_LINK = os.getenv("REQUIRED_GROUP_LINK", "").strip()
 SPONSOR_TEXT = os.getenv("SPONSOR_TEXT", "").strip()
 ERROR_GROUP_ID = os.getenv("ERROR_GROUP_ID", "").strip()  # Example: -1001234567890 or @your_error_group
 
@@ -318,6 +322,82 @@ def main_menu():
             [InlineKeyboardButton("ℹ️ Help", callback_data="help")],
         ]
     )
+
+
+
+def group_join_keyboard():
+    buttons = []
+    if REQUIRED_GROUP_LINK:
+        buttons.append([InlineKeyboardButton("📢 Join Group", url=REQUIRED_GROUP_LINK)])
+    buttons.append([InlineKeyboardButton("I Joined ✅", callback_data="check_group_join")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def membership_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check every user action before any command, download or callback runs."""
+    if not REQUIRED_GROUP_ID or not update.effective_user or not update.effective_message:
+        return
+    text = update.effective_message.text or ""
+    command = text.split(maxsplit=1)[0].split("@")[0].lower() if text else ""
+    # Keep the diagnostic command usable even if membership is misconfigured.
+    if update.message and command == "/groupid":
+        return
+    query = update.callback_query
+    if query and query.data == "check_group_join":
+        await query.answer()
+    referrer_id = None
+    if update.message and command == "/start":
+        args = text.split()
+        if len(args) > 1 and args[1].startswith("ref_"):
+            try:
+                referrer_id = int(args[1][4:])
+            except ValueError:
+                pass
+    register_user(update.effective_user, referrer_id)
+    if is_banned(update.effective_user.id):
+        await update.effective_message.reply_text("🚫 You are banned from using this bot.")
+        raise ApplicationHandlerStop
+    try:
+        member = await context.bot.get_chat_member(
+            chat_id=int(REQUIRED_GROUP_ID), user_id=update.effective_user.id
+        )
+        joined = member.status in ("member", "administrator", "creator") or (
+            member.status == "restricted" and member.is_member
+        )
+    except Exception as error:
+        print(f"Required group membership check failed: {type(error).__name__}")
+        await update.effective_message.reply_text(
+            "⚠️ Unable to verify membership right now. Please try I Joined ✅ again shortly.",
+            reply_markup=group_join_keyboard(),
+        )
+        raise ApplicationHandlerStop
+    if not joined:
+        await update.effective_message.reply_text(
+            "📢 Please join BvideoD Group to use this bot.\n"
+            "After joining, press I Joined ✅ below.",
+            reply_markup=group_join_keyboard(),
+        )
+        raise ApplicationHandlerStop
+    if query and query.data == "check_group_join":
+        await query.message.reply_text(
+            "✅ Membership verified! Send your video link, or use /mp3 <link> for audio.",
+            reply_markup=main_menu(),
+        )
+        raise ApplicationHandlerStop
+
+
+async def verify_required_group(application):
+    if not REQUIRED_GROUP_ID:
+        return
+    try:
+        chat = await application.bot.get_chat(int(REQUIRED_GROUP_ID))
+        member = await application.bot.get_chat_member(chat.id, application.bot.id)
+        if member.status not in ("administrator", "creator"):
+            print("Required group setup error: bot must be an administrator.", flush=True)
+        else:
+            print(f"Required group ready: {chat.title} ({chat.id}); bot is admin.", flush=True)
+    except Exception as error:
+        print(f"Required group setup check failed: {type(error).__name__}", flush=True)
 
 
 async def check_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1516,7 +1596,8 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).post_init(verify_required_group).build()
+    app.add_handler(TypeHandler(Update, membership_gate), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("top", top))
