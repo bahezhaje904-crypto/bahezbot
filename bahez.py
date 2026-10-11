@@ -1153,13 +1153,16 @@ async def send_file(message, file_path, preserve_video_scale=False):
         if extension in VIDEO_EXTENSIONS:
             # Telegram's video player supports MP4; send other containers as files.
             # This avoids animation-style previews for regular MP4 videos.
-            if extension == ".mp4" and not preserve_video_scale:
+            if extension == ".mp4":
+                width, height = video_dimensions(file_path)
+                video_kwargs = {"width": width, "height": height} if width and height else {}
                 try:
                     await message.reply_video(
                         video=media,
                         supports_streaming=True,
                         caption="📁 ڤیدیۆکە بە فول کوالیتی 🔥 ",
                         filename=os.path.basename(file_path),
+                        **video_kwargs,
                     )
                     return True
                 except (BadRequest, TimedOut, NetworkError) as error:
