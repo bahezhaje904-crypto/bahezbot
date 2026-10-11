@@ -1135,15 +1135,77 @@ def extract_first_frame(file_path):
         return None
 
 
+def compress_oversized_video(file_path):
+    """Create a Telegram-sized MP4 without changing the source aspect ratio."""
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        print("Cannot compress large video: ffmpeg/ffprobe unavailable")
+        return None
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            capture_output=True, text=True, check=True, timeout=25,
+        )
+        duration = float(probe.stdout.strip())
+        if duration <= 0:
+            return None
+    except (ValueError, subprocess.SubprocessError) as error:
+        print(f"Cannot read video duration: {error}")
+        return None
+
+    output = os.path.join(DOWNLOAD_DIR, f"telegram_{uuid.uuid4().hex}.mp4")
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    # Leave headroom below the Bot API's 50 MB upload limit.
+    target_bits = 45 * 1024 * 1024 * 8
+    audio_bitrate = 96000
+    video_bitrate = max(110000, int(target_bits / duration) - audio_bitrate - 25000)
+    # If the video is extremely long, it may be impossible to fit it legibly.
+    for factor in (1.0, 0.80):
+        bitrate = max(90000, int(video_bitrate * factor))
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", file_path, "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", "scale=w='min(1280,iw)':h='min(1280,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+            "-c:v", "libx264", "-preset", "veryfast", "-b:v", str(bitrate),
+            "-maxrate", str(bitrate), "-bufsize", str(bitrate * 2),
+            "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart",
+            "-pix_fmt", "yuv420p", output,
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=900)
+            if os.path.getsize(output) <= MAX_TELEGRAM_SIZE:
+                return output
+            print(f"Compressed video still exceeds Telegram limit: {os.path.getsize(output)}")
+        except (OSError, subprocess.SubprocessError) as error:
+            print(f"Video compression failed: {error}")
+        try:
+            os.remove(output)
+        except OSError:
+            pass
+    return None
+
+
 async def send_file(message, file_path, preserve_video_scale=False):
     if not os.path.exists(file_path):
         return False
 
-    if os.path.getsize(file_path) > MAX_TELEGRAM_SIZE:
-        await message.reply_text("The file is bigger than Telegram bot limit. Try a shorter/lower quality video.")
-        return False
-
     extension = os.path.splitext(file_path)[1].lower()
+    if os.path.getsize(file_path) > MAX_TELEGRAM_SIZE:
+        if extension not in VIDEO_EXTENSIONS:
+            await message.reply_text("This file exceeds Telegram's bot upload limit.")
+            return False
+        await message.reply_text("⏳ Video is large. Compressing it to fit Telegram...")
+        compressed = await asyncio.to_thread(compress_oversized_video, file_path)
+        if not compressed:
+            await message.reply_text("Sorry, this video is too large to send, even after compression.")
+            return False
+        try:
+            return await send_file(message, compressed, preserve_video_scale=preserve_video_scale)
+        finally:
+            try:
+                os.remove(compressed)
+            except OSError:
+                pass
 
     with open(file_path, "rb") as media:
         if extension in IMAGE_EXTENSIONS:
