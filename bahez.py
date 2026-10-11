@@ -806,7 +806,9 @@ def ydl_options(url, kind="video"):
         options["extractor_args"] = {"instagram": {"app_id": ["936619743392459"]}}
 
     if is_youtube_url(url):
-        options["extractor_args"] = {"youtube": {"player_client": ["default", "ios", "web_safari", "mweb"]}}
+        # Let current yt-dlp choose supported default clients first.
+        # Forced older clients may return video URLs that fail with HTTP 403.
+        options["extractor_args"] = {"youtube": {"player_client": ["default"]}}
     return options
 
 
@@ -823,12 +825,33 @@ def instagram_retry_options(url, kind="video", use_cookies=True):
 
 
 def download_with_yt_dlp(url, options):
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=True)
-        return {
-            "file_path": ydl.prepare_filename(info),
-            "thumbnail_url": info.get("thumbnail"),
-        }
+    attempts = [options]
+    if is_youtube_url(url):
+        # Only retry an HTTP 403 with alternate YouTube format/client settings.
+        # A fresh extractor instance also avoids reusing an expired media URL.
+        for client, video_format in (
+            ("default", "best[ext=mp4]/best"),
+            ("visionos", "bv*+ba/b"),
+        ):
+            fallback = options.copy()
+            fallback["extractor_args"] = {"youtube": {"player_client": [client]}}
+            fallback["format"] = "bestaudio/best" if options.get("postprocessors") else video_format
+            fallback["outtmpl"] = options["outtmpl"].replace(".%(ext)s", f"_{client}.%(ext)s")
+            attempts.append(fallback)
+
+    for index, attempt in enumerate(attempts):
+        try:
+            with yt_dlp.YoutubeDL(attempt) as ydl:
+                info = ydl.extract_info(url, download=True)
+                return {
+                    "file_path": ydl.prepare_filename(info),
+                    "thumbnail_url": info.get("thumbnail"),
+                }
+        except yt_dlp.utils.DownloadError as error:
+            if not is_youtube_url(url) or "403" not in str(error) or index == len(attempts) - 1:
+                raise
+            print(f"YouTube HTTP 403 on attempt {index + 1}; trying alternate client/format.")
+
 
 
 def normalize_url(url):
@@ -1154,6 +1177,14 @@ async def send_download(message, url, context=None, kind="video"):
         if is_instagram_url(url) and instagram_cookie_error(error):
             await report_download_error(context, message, url, error, kind)
             await message.reply_text(instagram_cookie_message())
+            return False
+        if is_youtube_url(url) and "403" in str(error):
+            await report_download_error(context, message, url, error, kind)
+            await message.reply_text(
+                "YouTube refused the video download (HTTP 403). "
+                "Please try another public link or try again later. "
+                "This is a server/download restriction, not a 24-hour account ban."
+            )
             return False
         if is_youtube_url(url) and youtube_cookie_error(error):
             await report_download_error(context, message, url, error, kind)
