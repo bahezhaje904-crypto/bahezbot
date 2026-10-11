@@ -51,6 +51,8 @@ RUNTIME_INSTAGRAM_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "instagram_cookies.t
 SUPPORTED_HOST_SUFFIXES = (
     "tiktok.com",
     "instagram.com",
+    "instagr.am",
+    "snapchat.com",
     "facebook.com",
     "fb.watch",
     "youtu.be",
@@ -280,8 +282,10 @@ def platform_name(url):
     lowered = url.lower()
     if "tiktok" in lowered:
         return "TikTok"
-    if "instagram" in lowered:
+    if "instagram" in lowered or "instagr.am" in lowered:
         return "Instagram"
+    if host_matches(url_host(url), "snapchat.com"):
+        return "Snapchat"
     if "facebook" in lowered or "fb.watch" in lowered:
         return "Facebook"
     if "youtube" in lowered or "youtu.be" in lowered:
@@ -379,7 +383,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "ℹ️ How to use:\n\n"
-        "1. Send a video link to download video.\n"
+        "1. Send a public Instagram, Facebook, Snapchat, YouTube, TikTok or X video link.\n"
         "2. Use /mp3 <link> for audio only.\n"
         "3. Use /profile to see your account.\n"
         "4. Invite friends to climb /top."
@@ -606,7 +610,7 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = urls[0].strip()
     if not is_supported_url(url):
         await update.message.reply_text(
-            "Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only."
+            "Unsupported link. Send a public Instagram, Facebook, Snapchat, YouTube, TikTok, or X link."
         )
         return
 
@@ -714,7 +718,24 @@ def is_youtube_url(url):
 
 
 def is_instagram_url(url):
-    return host_matches(url_host(url), "instagram.com")
+    return any(host_matches(url_host(url), domain) for domain in ("instagram.com", "instagr.am"))
+
+
+def is_snapchat_url(url):
+    return host_matches(url_host(url), "snapchat.com")
+
+
+def public_media_error(error):
+    message = str(error).lower()
+    return any(term in message for term in ("unsupported url", "login required", "private", "not available", "not found", "403", "404"))
+
+
+def public_media_message(url):
+    return (
+        f"❌ Could not download this public {platform_name(url)} link. "
+        "The story may have expired, the post may require login, or the platform may not expose the media. "
+        "Please try a direct public Story, Spotlight, Reel, or video link."
+    )
 
 
 def instagram_cookie_error(error):
@@ -797,6 +818,11 @@ def ydl_options(url, kind="video"):
         else:
             options["format"] = "bv*+ba/b"
             options["merge_output_format"] = "mp4"
+    if is_snapchat_url(url):
+        # Snapchat public Spotlight/Story extraction is dependent on yt-dlp support.
+        # Prefer a ready-to-send MP4; do not require cookies or access private media.
+        options["format"] = "best[ext=mp4]/best"
+        options.pop("merge_output_format", None)
     if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
@@ -1160,7 +1186,10 @@ async def send_download(message, url, context=None, kind="video"):
             await message.reply_text(youtube_cookie_message())
             return False
         await report_download_error(context, message, url, error, kind)
-        await send_clean_error(message)
+        if is_snapchat_url(url) or (is_facebook_url(url) and public_media_error(error)):
+            await message.reply_text(public_media_message(url))
+        else:
+            await send_clean_error(message)
         return False
     finally:
         for path in set(cleanup_files):
