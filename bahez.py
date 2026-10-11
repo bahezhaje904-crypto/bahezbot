@@ -972,7 +972,14 @@ def download_with_yt_dlp(url, options):
                 attempts.append(fallback)
 
     if is_youtube_url(url):
-        # Only retry an HTTP 403 with alternate YouTube format/client settings.
+        # Try anonymously if configured YouTube cookies are expired or rejected.
+        # This preserves production secrets and matches the test bot's behavior.
+        if options.get("cookiefile"):
+            anonymous = options.copy()
+            anonymous.pop("cookiefile", None)
+            anonymous["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_anonymous.%(ext)s")
+            attempts.append(anonymous)
+        # Retry HTTP 403 and login challenges with alternate format/client settings.
         # A fresh extractor instance also avoids reusing an expired media URL.
         for client, video_format in (
             ("default", "best[ext=mp4]/best"),
@@ -1001,9 +1008,14 @@ def download_with_yt_dlp(url, options):
             if is_facebook_url(url) and index < len(attempts) - 1:
                 print("Facebook link failed; retrying canonical public post URL.")
                 continue
-            if not is_youtube_url(url) or "403" not in str(error) or index == len(attempts) - 1:
+            youtube_retryable = (
+                "403" in str(error)
+                or "sign in to confirm" in str(error).lower()
+                or "login required" in str(error).lower()
+            )
+            if not is_youtube_url(url) or not youtube_retryable or index == len(attempts) - 1:
                 raise
-            print(f"YouTube HTTP 403 on attempt {index + 1}; trying alternate client/format.")
+            print(f"YouTube authentication/403 failure on attempt {index + 1}; trying fallback.")
 
 
 
