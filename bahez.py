@@ -48,6 +48,7 @@ TIKWM_API_URL = "https://www.tikwm.com/api/"
 DEFAULT_COOKIES_FILE = "cookies.txt"
 RUNTIME_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "youtube_cookies.txt")
 RUNTIME_INSTAGRAM_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "instagram_cookies.txt")
+RUNTIME_FACEBOOK_COOKIES_FILE = os.path.join(DOWNLOAD_DIR, "facebook_cookies.txt")
 SUPPORTED_HOST_SUFFIXES = (
     "tiktok.com",
     "instagram.com",
@@ -695,8 +696,23 @@ def prepare_instagram_cookies_file():
     return None
 
 
+def prepare_facebook_cookies_file():
+    facebook_cookie_file = write_cookies_from_env(
+        "FACEBOOK_COOKIES_TEXT",
+        "FACEBOOK_COOKIES_B64",
+        RUNTIME_FACEBOOK_COOKIES_FILE,
+    )
+    if facebook_cookie_file:
+        return facebook_cookie_file
+    custom_file = os.getenv("FACEBOOK_COOKIES_FILE")
+    if custom_file:
+        return custom_file
+    return None
+
+
 COOKIES_FILE = prepare_cookies_file()
 INSTAGRAM_COOKIES_FILE = prepare_instagram_cookies_file()
+FACEBOOK_COOKIES_FILE = prepare_facebook_cookies_file()
 
 
 def is_tiktok_url(url):
@@ -797,7 +813,9 @@ def ydl_options(url, kind="video"):
         else:
             options["format"] = "bv*+ba/b"
             options["merge_output_format"] = "mp4"
-    if is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
+    if is_facebook_url(url) and FACEBOOK_COOKIES_FILE and os.path.exists(FACEBOOK_COOKIES_FILE):
+        options["cookiefile"] = FACEBOOK_COOKIES_FILE
+    elif is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
         options["cookiefile"] = COOKIES_FILE
@@ -1177,6 +1195,19 @@ async def send_download(message, url, context=None, kind="video"):
         if is_instagram_url(url) and instagram_cookie_error(error):
             await report_download_error(context, message, url, error, kind)
             await message.reply_text(instagram_cookie_message())
+            return False
+        if is_facebook_url(url) and (
+            "facebook.com/login/" in str(error).lower()
+            or "login required" in str(error).lower()
+            or "unsupported url" in str(error).lower()
+        ):
+            await report_download_error(context, message, url, error, kind)
+            await message.reply_text(
+                "Facebook redirected this link to a login page or did not expose a downloadable video. "
+                "Check that the video is public and try its direct video/Reel URL. "
+                "If Facebook still requires sign-in, configure FACEBOOK_COOKIES_TEXT "
+                "in Railway Variables using cookies from an account authorized to view the video."
+            )
             return False
         if is_youtube_url(url) and "403" in str(error):
             await report_download_error(context, message, url, error, kind)
