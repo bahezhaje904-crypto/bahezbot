@@ -1153,7 +1153,7 @@ async def send_file(message, file_path, preserve_video_scale=False):
         if extension in VIDEO_EXTENSIONS:
             # Telegram's video player supports MP4; send other containers as files.
             # This avoids animation-style previews for regular MP4 videos.
-            if extension == ".mp4":
+            if extension == ".mp4" and not preserve_video_scale:
                 try:
                     await message.reply_video(
                         video=media,
@@ -1251,7 +1251,7 @@ async def send_download(message, url, context=None, kind="video"):
     cleanup_files = []
     thumbnail_url = None
     # Send Instagram and Facebook as documents to preserve the original aspect ratio.
-    preserve_video_scale = is_facebook_url(url) or is_instagram_url(url)
+    preserve_video_scale = is_instagram_url(url)
     url = normalize_url(url)
     await message.reply_text("چاوەڕوانە... ⏳")
     try:
