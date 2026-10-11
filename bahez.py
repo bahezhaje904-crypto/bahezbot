@@ -54,6 +54,7 @@ SUPPORTED_HOST_SUFFIXES = (
     "instagram.com",
     "facebook.com",
     "fb.watch",
+    "snapchat.com",
     "youtu.be",
     "youtube.com",
     "youtube-nocookie.com",
@@ -367,7 +368,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to Bahez Video Downloader\n\n"
         f"👥 Subscribers: {total}\n\n"
-        "Send a TikTok, Instagram, Facebook, YouTube, or X link.\n\n"
+        "Send a TikTok, Instagram, Facebook, Snapchat, YouTube, or X link.\n\n"
         "Commands:\n"
         "/mp3 <link> - download audio\n"
         "/top - top inviters\n"
@@ -607,7 +608,7 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = urls[0].strip()
     if not is_supported_url(url):
         await update.message.reply_text(
-            "Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only."
+            "Unsupported link. Send TikTok, Instagram, Facebook, Snapchat, YouTube, or X only."
         )
         return
 
@@ -636,7 +637,7 @@ async def mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     url = urls[0].strip()
     if not is_supported_url(url):
-        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, YouTube, or X only.")
+        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, Snapchat, YouTube, or X only.")
         return
     success = await send_download(update.message, url, context=context, kind="mp3")
     if success:
@@ -717,6 +718,10 @@ FACEBOOK_COOKIES_FILE = prepare_facebook_cookies_file()
 
 def is_tiktok_url(url):
     return host_matches(url_host(url), "tiktok.com")
+
+
+def is_snapchat_url(url):
+    return host_matches(url_host(url), "snapchat.com")
 
 
 def is_facebook_url(url):
