@@ -1283,7 +1283,62 @@ def compress_oversized_video(file_path):
     return None
 
 
+def prepare_iphone_video(file_path):
+    """Normalize every video to a square-pixel H.264/AAC fast-start MP4."""
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError("Video conversion requires ffmpeg and ffprobe.")
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams", "-of", "json", file_path],
+        check=True, capture_output=True, text=True, timeout=30,
+    )
+    streams = json.loads(probe.stdout).get("streams", [])
+    if not any(s.get("codec_type") == "video" for s in streams):
+        raise RuntimeError("Downloaded file has no video stream.")
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+    output = os.path.join(DOWNLOAD_DIR, f"iphone_{uuid.uuid4().hex}.mp4")
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", file_path]
+    # A silent audio track keeps soundless videos from becoming Telegram GIFs.
+    if not has_audio:
+        command += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+    command += [
+        "-map", "0:v:0", "-map", "0:a:0" if has_audio else "1:a:0",
+        # Bake anamorphic pixels into the raster; retain portrait/landscape shape.
+        "-vf", "scale=w='max(2,round(iw*sar/2)*2)':h='max(2,round(ih/2)*2)',setsar=1",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
+        "-map_metadata", "-1", "-map_chapters", "-1", "-movflags", "+faststart",
+    ]
+    if not has_audio:
+        command += ["-shortest"]
+    command.append(output)
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=900)
+        if not os.path.getsize(output):
+            raise RuntimeError("Video conversion produced an empty file.")
+        return output
+    except Exception:
+        if os.path.exists(output):
+            os.remove(output)
+        raise
+
+
 async def send_file(message, file_path, preserve_video_scale=False):
+    if not os.path.exists(file_path):
+        return False
+    if os.path.splitext(file_path)[1].lower() not in VIDEO_EXTENSIONS:
+        return await send_prepared_file(message, file_path, preserve_video_scale)
+    prepared = await asyncio.to_thread(prepare_iphone_video, file_path)
+    try:
+        return await send_prepared_file(message, prepared, preserve_video_scale)
+    finally:
+        try:
+            os.remove(prepared)
+        except OSError:
+            pass
+
+
+async def send_prepared_file(message, file_path, preserve_video_scale=False):
     if not os.path.exists(file_path):
         return False
 
@@ -1298,7 +1353,7 @@ async def send_file(message, file_path, preserve_video_scale=False):
             await message.reply_text("Sorry, this video is too large to send, even after compression.")
             return False
         try:
-            return await send_file(message, compressed, preserve_video_scale=preserve_video_scale)
+            return await send_prepared_file(message, compressed, preserve_video_scale=preserve_video_scale)
         finally:
             try:
                 os.remove(compressed)
@@ -1628,3 +1683,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
