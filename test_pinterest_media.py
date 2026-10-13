@@ -83,10 +83,11 @@ class PinterestTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'no audio'):
                 pm.download_pin('https://pinterest.com/pin/123/', 'mp3', directory, {}, MagicMock(), 100)
 
-    def test_telegram_photo_send_and_cleanup(self):
+    def test_telegram_original_send_and_cleanup(self):
         message = MagicMock()
         message.reply_text = AsyncMock()
         message.reply_photo = AsyncMock()
+        message.reply_document = AsyncMock()
         directories = []
         def download(url, kind, directory, *args):
             directories.append(directory)
@@ -96,8 +97,29 @@ class PinterestTests(unittest.TestCase):
             return [path]
         with patch.object(bahez, 'download_pin', side_effect=download):
             self.assertTrue(asyncio.run(bahez.send_download(message, 'https://pin.it/abc')))
-        message.reply_photo.assert_awaited_once()
+        message.reply_document.assert_awaited_once()
+        message.reply_photo.assert_not_awaited()
+        self.assertTrue(message.reply_document.call_args.kwargs["disable_content_type_detection"])
         self.assertFalse(os.path.exists(directories[0]))
+
+    def test_original_bytes_for_photo_gif_and_video(self):
+        for extension in ('.jpg', '.gif', '.mp4'):
+            message = MagicMock()
+            message.reply_text = AsyncMock()
+            payload = b'original-media-bytes'
+            async def verify_upload(**kwargs):
+                self.assertEqual(kwargs['document'].read(), payload)
+                self.assertTrue(kwargs['filename'].endswith(extension))
+            message.reply_document = AsyncMock(side_effect=verify_upload)
+            def download(url, kind, directory, *args):
+                path = os.path.join(directory, 'pin' + extension)
+                with open(path, 'wb') as file:
+                    file.write(payload)
+                return [path]
+            with patch.object(bahez, 'download_pin', side_effect=download), patch.object(bahez, 'prepare_iphone_video') as convert:
+                self.assertTrue(asyncio.run(bahez.send_download(message, 'https://pin.it/abc')))
+                convert.assert_not_called()
+            message.reply_document.assert_awaited_once()
 
 if __name__ == '__main__':
     unittest.main()

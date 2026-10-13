@@ -1478,24 +1478,22 @@ async def send_pinterest_download(message, url, context=None, kind="video"):
             )
             sent = False
             for path in paths:
-                if os.path.splitext(path)[1].lower() == ".gif":
-                    with open(path, "rb") as animation:
-                        try:
-                            await message.reply_animation(animation=animation)
-                        except BadRequest:
-                            animation.seek(0)
-                            await message.reply_document(document=animation, filename=os.path.basename(path))
-                    sent = True
-                elif os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS:
-                    with open(path, "rb") as photo:
-                        try:
-                            await message.reply_photo(photo=photo)
-                        except BadRequest:
-                            photo.seek(0)
-                            await message.reply_document(document=photo, filename=os.path.basename(path))
-                    sent = True
-                else:
-                    sent = await send_file(message, path) or sent
+                # Deliver the downloaded bytes directly: photo/animation previews
+                # and the general video conversion path can reduce quality.
+                if os.path.getsize(path) > MAX_TELEGRAM_SIZE:
+                    await message.reply_text(
+                        "The original Pinterest file exceeds this bot's upload limit. "
+                        "It has not been compressed."
+                    )
+                    continue
+                with open(path, "rb") as original:
+                    await message.reply_document(
+                        document=original,
+                        filename=os.path.basename(path),
+                        caption="📁 Original Pinterest file • no added compression",
+                        disable_content_type_detection=True,
+                    )
+                sent = True
             return sent
     except Exception as error:
         await report_download_error(context, message, url, error, kind)
