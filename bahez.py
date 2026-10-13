@@ -1478,7 +1478,15 @@ async def send_pinterest_download(message, url, context=None, kind="video"):
             )
             sent = False
             for path in paths:
-                if os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS:
+                if os.path.splitext(path)[1].lower() == ".gif":
+                    with open(path, "rb") as animation:
+                        try:
+                            await message.reply_animation(animation=animation)
+                        except BadRequest:
+                            animation.seek(0)
+                            await message.reply_document(document=animation, filename=os.path.basename(path))
+                    sent = True
+                elif os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS:
                     with open(path, "rb") as photo:
                         try:
                             await message.reply_photo(photo=photo)

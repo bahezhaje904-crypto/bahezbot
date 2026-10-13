@@ -69,6 +69,15 @@ class PinterestTests(unittest.TestCase):
                 paths = pm.download_pin('https://pinterest.com/pin/123/', 'video', directory, {'cookiefile':'youtube'}, download, 100)
                 self.assertTrue(paths[0].endswith('.mp4'))
 
+    def test_gif_download_preserves_animation(self):
+        data = {'id': '123', 'embed': {'type': 'gif', 'src': 'https://i.pinimg.com/a.gif'}, 'images': {'orig': {'url': 'https://i.pinimg.com/a.gif'}}}
+        self.assertFalse(pm.pin_has_video(data))
+        with tempfile.TemporaryDirectory() as directory, patch.object(pm.requests, 'get', side_effect=[response(data), response(headers={'Content-Type': 'image/gif'}, chunks=[b'GIF89a'])]):
+            video = MagicMock()
+            files = pm.download_pin('https://pinterest.com/pin/123/', 'video', directory, {}, video, 100)
+            self.assertTrue(files[0].endswith('.gif'))
+            video.assert_not_called()
+
     def test_photo_has_no_mp3(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(pm.requests, 'get', return_value=response({'id':'123','images':{}})):
             with self.assertRaisesRegex(ValueError, 'no audio'):

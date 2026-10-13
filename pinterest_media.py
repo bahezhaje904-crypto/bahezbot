@@ -41,7 +41,7 @@ def canonical_pin(url):
 def pin_has_video(data):
     if isinstance(data, dict):
         embed = data.get('embed')
-        if data.get('video_list') or (isinstance(embed, dict) and embed.get('src')):
+        if data.get('video_list') or (isinstance(embed, dict) and embed.get('src') and embed.get('type') != 'gif'):
             return True
         return any(pin_has_video(value) for key, value in data.items() if key in ('videos', 'story_pin_data', 'pages', 'blocks', 'video'))
     if isinstance(data, list):
