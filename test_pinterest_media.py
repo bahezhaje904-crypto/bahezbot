@@ -35,6 +35,18 @@ class PinterestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 pm.canonical_pin('https://pin.it/abc')
 
+    def test_shared_pin_sent_suffix(self):
+        for url in (
+            'https://www.pinterest.com/pin/939845016006398419/sent/?sender=123',
+            'https://www.pinterest.com/pin/a-title--939845016006398419/sent/',
+        ):
+            self.assertEqual(pm.canonical_pin(url), ('https://www.pinterest.com/pin/939845016006398419/', '939845016006398419'))
+        with patch.object(pm.requests, 'get', side_effect=[
+            response(headers={'Location': 'https://api.pinterest.com/url_shortener/abc/redirect/'}),
+            response(headers={'Location': 'https://www.pinterest.com/pin/939845016006398419/sent/?sender=123'}),
+        ]):
+            self.assertEqual(pm.canonical_pin('https://pin.it/abc')[1], '939845016006398419')
+
     def test_photo_original_and_limit(self):
         data = {'id':'123', 'images':{'orig':{'url':'https://i.pinimg.com/originals/a.jpg'}, 'small':{'url':'bad'}}}
         with tempfile.TemporaryDirectory() as directory, patch.object(pm.requests, 'get', side_effect=[response(data), response(headers={'Content-Type':'image/jpeg'})]):

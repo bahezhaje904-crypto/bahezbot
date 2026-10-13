@@ -26,7 +26,7 @@ def canonical_pin(url):
     for _ in range(6):
         if not is_pinterest_url(url):
             raise ValueError('Please send a public Pinterest pin link.')
-        match = re.fullmatch(r'/pin/(?:[\w-]+--)?(\d+)/?', urlparse(url).path)
+        match = re.fullmatch(r'/pin/(?:[\w-]+--)?(\d+)(?:/sent)?/?', urlparse(url).path)
         if match:
             return f'https://www.pinterest.com/pin/{match[1]}/', match[1]
         with requests.get(url, headers=HEADERS, timeout=30, allow_redirects=False, stream=True) as response:
@@ -35,7 +35,7 @@ def canonical_pin(url):
             if not location:
                 break
             url = urljoin(url, location)
-    raise ValueError('Send an individual Pinterest pin, not a board or profile.')
+    raise ValueError('Could not resolve this Pinterest link. Try opening the pin in your browser and copying its full pinterest.com/pin/ link.')
 
 
 def pin_has_video(data):
