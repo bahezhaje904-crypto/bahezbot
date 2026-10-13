@@ -7,6 +7,8 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
+from pinterest_media import PINTEREST_DOMAINS, is_pinterest_url, download_pin
 import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote, urlparse, parse_qs, urlencode, urlunparse
@@ -65,7 +67,7 @@ SUPPORTED_HOST_SUFFIXES = (
     "youtube-nocookie.com",
     "x.com",
     "twitter.com",
-)
+) + PINTEREST_DOMAINS
 
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -284,6 +286,8 @@ def has_new_referral(user_id):
 
 
 def platform_name(url):
+    if is_pinterest_url(url):
+        return "Pinterest"
     lowered = url.lower()
     if "tiktok" in lowered:
         return "TikTok"
@@ -455,7 +459,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to Bahez Video Downloader\n\n"
         f"👥 Subscribers: {total}\n\n"
-        "Send a TikTok, Instagram, Facebook, Snapchat, YouTube, or X link.\n\n"
+        "Send a TikTok, Instagram, Facebook, Snapchat, YouTube, Pinterest, or X link.\n\n"
         "Commands:\n"
         "/mp3 <link> - download audio\n"
         "/top - top inviters\n"
@@ -468,7 +472,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "ℹ️ How to use:\n\n"
-        "1. Send a video link to download video.\n"
+        "1. Send a video link, or a Pinterest photo/video pin.\n"
         "2. Use /mp3 <link> for audio only.\n"
         "3. Use /profile to see your account.\n"
         "4. Invite friends to climb /top."
@@ -689,13 +693,13 @@ async def download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     urls = re.findall(r"https?://[^\s]+", text)
     if not urls:
-        await update.message.reply_text("Please send a valid video link.")
+        await update.message.reply_text("Please send a valid video or Pinterest photo link.")
         return
 
     url = urls[0].strip()
     if not is_supported_url(url):
         await update.message.reply_text(
-            "Unsupported link. Send TikTok, Instagram, Facebook, Snapchat, YouTube, or X only."
+            "Unsupported link. Send TikTok, Instagram, Facebook, Snapchat, YouTube, Pinterest, or X only."
         )
         return
 
@@ -724,7 +728,7 @@ async def mp3(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     url = urls[0].strip()
     if not is_supported_url(url):
-        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, Snapchat, YouTube, or X only.")
+        await update.message.reply_text("Unsupported link. Send TikTok, Instagram, Facebook, Snapchat, YouTube, Pinterest, or X only.")
         return
     success = await send_download(update.message, url, context=context, kind="mp3")
     if success:
@@ -1464,7 +1468,39 @@ async def send_clean_error(message):
     await message.reply_text(USER_ERROR_MESSAGE)
 
 
+async def send_pinterest_download(message, url, context=None, kind="video"):
+    await message.reply_text("چاوەڕوانە... ⏳")
+    try:
+        with tempfile.TemporaryDirectory(prefix="pinterest_", dir=DOWNLOAD_DIR) as directory:
+            paths = await asyncio.to_thread(
+                download_pin, url, kind, directory, ydl_options(url, kind),
+                download_with_yt_dlp, MAX_TELEGRAM_SIZE,
+            )
+            sent = False
+            for path in paths:
+                if os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS:
+                    with open(path, "rb") as photo:
+                        try:
+                            await message.reply_photo(photo=photo)
+                        except BadRequest:
+                            photo.seek(0)
+                            await message.reply_document(document=photo, filename=os.path.basename(path))
+                    sent = True
+                else:
+                    sent = await send_file(message, path) or sent
+            return sent
+    except Exception as error:
+        await report_download_error(context, message, url, error, kind)
+        if isinstance(error, ValueError):
+            await message.reply_text(str(error))
+        else:
+            await send_clean_error(message)
+        return False
+
+
 async def send_download(message, url, context=None, kind="video"):
+    if is_pinterest_url(url):
+        return await send_pinterest_download(message, url, context, kind)
     files_to_send = []
     cleanup_files = []
     thumbnail_url = None
