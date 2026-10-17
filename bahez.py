@@ -921,7 +921,7 @@ def ydl_options(url, kind="video"):
         options["cookiefile"] = FACEBOOK_COOKIES_FILE
     elif is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
-    elif COOKIES_FILE and os.path.exists(COOKIES_FILE):
+    elif is_youtube_url(url) and COOKIES_FILE and os.path.exists(COOKIES_FILE):
         options["cookiefile"] = COOKIES_FILE
 
     if is_instagram_url(url):
@@ -942,6 +942,11 @@ def ydl_options(url, kind="video"):
 
 def instagram_retry_options(url, kind="video", use_cookies=True):
     options = ydl_options(url, kind=kind)
+    # A different official client can expose video_versions when the web API
+    # returns metadata with no playable formats. Repeating web extraction with
+    # a different format selector cannot recover formats absent from metadata.
+    if use_cookies:
+        options["extractor_args"] = {"instagram": {"app_id": ["124024574287414"]}}
     if kind == "video":
         # Instagram often exposes a ready-to-send combined MP4 even when its
         # separate video/audio formats cannot be merged on a hosted server.
@@ -950,6 +955,28 @@ def instagram_retry_options(url, kind="video", use_cookies=True):
     if not use_cookies:
         options.pop("cookiefile", None)
     return options
+
+
+def log_instagram_cookie_status():
+    """Log session availability without exposing cookie values."""
+    from http.cookiejar import MozillaCookieJar
+    if not INSTAGRAM_COOKIES_FILE:
+        print("Instagram session status: cookie file not configured", flush=True)
+        return
+    try:
+        jar = MozillaCookieJar(INSTAGRAM_COOKIES_FILE)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        sessions = [cookie for cookie in jar if cookie.name == "sessionid"
+                    and host_matches(cookie.domain.lstrip("."), "instagram.com")]
+        status = ("missing sessionid" if not sessions else
+                  "expired sessionid" if all(c.is_expired() for c in sessions) else
+                  "sessionid present (server acceptance not verified)")
+        print(f"Instagram session status: {status}", flush=True)
+    except (OSError, ValueError):
+        print("Instagram session status: unreadable or invalid Netscape cookie file", flush=True)
+
+
+log_instagram_cookie_status()
 
 
 def log_snapchat_formats(url, options):
@@ -1683,4 +1710,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
