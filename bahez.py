@@ -917,8 +917,6 @@ def ydl_options(url, kind="video"):
             options["merge_output_format"] = "mp4"
     if is_snapchat_url(url) and SNAPCHAT_COOKIES_FILE and os.path.exists(SNAPCHAT_COOKIES_FILE):
         options["cookiefile"] = SNAPCHAT_COOKIES_FILE
-    elif is_facebook_url(url) and FACEBOOK_COOKIES_FILE and os.path.exists(FACEBOOK_COOKIES_FILE):
-        options["cookiefile"] = FACEBOOK_COOKIES_FILE
     elif is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
         options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif is_youtube_url(url) and COOKIES_FILE and os.path.exists(COOKIES_FILE):
@@ -1071,37 +1069,60 @@ def download_with_yt_dlp(url, options):
     if is_snapchat_url(url) and os.getenv("SNAPCHAT_INSPECT_FORMATS", "0") == "1":
         log_snapchat_formats(url, options)
     if is_facebook_url(url):
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
-        # Some public story posts resolve more reliably through the canonical
-        # post permalink than through a story.php share redirect.
-        if parsed.path.rstrip("/") == "/story.php" and params.get("story_fbid"):
-            story_id = params["story_fbid"][0]
-            owner_id = params.get("id", [None])[0]
-            if owner_id and story_id.isdigit() and owner_id.isdigit():
-                fallback = options.copy()
-                fallback["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_fbpost.%(ext)s")
-                fallback["_facebook_retry_url"] = f"https://www.facebook.com/{owner_id}/posts/{story_id}"
-                attempts.append(fallback)
+        # Cookie-free Facebook mode: never attach a saved Facebook session.
+        # Resolve short share links and extract their canonical story/video ID.
+        # This is limited to public media; Facebook may still require login.
+        candidates = [url]
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/131.0 Mobile Safari/537.36"},
+                timeout=12,
+                allow_redirects=True,
+                stream=True,
+            )
+            redirected = response.url
+            response.close()
+            parsed_redirect = urlparse(redirected)
+            if parsed_redirect.path.rstrip("/") == "/login":
+                nested = parse_qs(parsed_redirect.query).get("next", [])
+                if nested and is_facebook_url(nested[0]):
+                    redirected = nested[0]
+            if is_facebook_url(redirected):
+                candidates.append(redirected)
+        except requests.RequestException as error:
+            print(f"Facebook public link resolution unavailable: {type(error).__name__}")
 
-    if is_facebook_url(url):
-        # Public Facebook videos sometimes work without a stale login session.
-        # Keep authenticated access first, then try anonymous extraction.
-        if options.get("cookiefile"):
-            anonymous = options.copy()
-            anonymous.pop("cookiefile", None)
-            anonymous["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_fbpublic.%(ext)s")
-            attempts.append(anonymous)
-        # Prefer the clean canonical watch URL when Facebook supplies a video ID.
-        parsed = urlparse(url)
-        params = parse_qs(parsed.query)
-        if parsed.path.rstrip("/") == "/story.php" and params.get("story_fbid"):
-            story_id = params["story_fbid"][0]
-            if story_id.isdigit():
-                watch = options.copy()
-                watch["_facebook_retry_url"] = f"https://www.facebook.com/watch/?v={story_id}"
-                watch["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_fbwatch.%(ext)s")
-                attempts.append(watch)
+        for candidate in list(candidates):
+            parsed = urlparse(candidate)
+            params = parse_qs(parsed.query)
+            story_id = (params.get("story_fbid") or params.get("v") or [None])[0]
+            owner_id = (params.get("id") or [None])[0]
+            if story_id and story_id.isdigit():
+                candidates.extend([
+                    f"https://www.facebook.com/watch/?v={story_id}",
+                    f"https://www.facebook.com/video.php?v={story_id}",
+                    f"https://www.facebook.com/reel/{story_id}",
+                ])
+                if owner_id and owner_id.isdigit():
+                    candidates.append(f"https://www.facebook.com/{owner_id}/videos/{story_id}/")
+                    candidates.append(f"https://www.facebook.com/{owner_id}/posts/{story_id}")
+        seen = set()
+        attempts = []
+        for candidate in candidates:
+            candidate = normalize_url(candidate)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            fallback = options.copy()
+            fallback.pop("cookiefile", None)
+            fallback["_facebook_retry_url"] = candidate
+            fallback["outtmpl"] = options["outtmpl"].replace(
+                ".%(ext)s", f"_fb{len(attempts)}.%(ext)s"
+            )
+            fallback["format"] = "best[ext=mp4]/best"
+            attempts.append(fallback)
+        print(f"Facebook public extraction: {len(attempts)} cookie-free URL candidates")
 
     if is_youtube_url(url):
         # Try anonymously if configured YouTube cookies are expired or rejected.
@@ -1628,8 +1649,8 @@ async def send_download(message, url, context=None, kind="video"):
             await message.reply_text(
                 "Facebook redirected this link to a login page or did not expose a downloadable video. "
                 "Check that the video is public and try its direct video/Reel URL. "
-                "If Facebook still requires sign-in, configure FACEBOOK_COOKIES_TEXT "
-                "in Railway Variables using cookies from an account authorized to view the video."
+                "Facebook may require sign-in even for some public videos; "
+                "this bot uses public cookie-free downloads only."
             )
             return False
         if is_youtube_url(url) and "403" in str(error):
