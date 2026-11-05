@@ -1084,6 +1084,25 @@ def download_with_yt_dlp(url, options):
                 fallback["_facebook_retry_url"] = f"https://www.facebook.com/{owner_id}/posts/{story_id}"
                 attempts.append(fallback)
 
+    if is_facebook_url(url):
+        # Public Facebook videos sometimes work without a stale login session.
+        # Keep authenticated access first, then try anonymous extraction.
+        if options.get("cookiefile"):
+            anonymous = options.copy()
+            anonymous.pop("cookiefile", None)
+            anonymous["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_fbpublic.%(ext)s")
+            attempts.append(anonymous)
+        # Prefer the clean canonical watch URL when Facebook supplies a video ID.
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        if parsed.path.rstrip("/") == "/story.php" and params.get("story_fbid"):
+            story_id = params["story_fbid"][0]
+            if story_id.isdigit():
+                watch = options.copy()
+                watch["_facebook_retry_url"] = f"https://www.facebook.com/watch/?v={story_id}"
+                watch["outtmpl"] = options["outtmpl"].replace(".%(ext)s", "_fbwatch.%(ext)s")
+                attempts.append(watch)
+
     if is_youtube_url(url):
         # Try anonymously if configured YouTube cookies are expired or rejected.
         # This preserves production secrets and matches the test bot's behavior.
@@ -1119,7 +1138,7 @@ def download_with_yt_dlp(url, options):
                 print("Snapchat direct media failed; retrying original URL.")
                 continue
             if is_facebook_url(url) and index < len(attempts) - 1:
-                print("Facebook link failed; retrying canonical public post URL.")
+                print("Facebook extraction failed; trying next authorized/public URL method.")
                 continue
             youtube_retryable = (
                 "403" in str(error)
