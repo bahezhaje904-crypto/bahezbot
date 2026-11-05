@@ -1090,9 +1090,17 @@ def download_with_yt_dlp(url, options):
                     redirected = nested[0]
             if is_facebook_url(redirected):
                 candidates.append(redirected)
+            # Facebook's login redirect often embeds a public story permalink
+            # in its next= parameter. Preserve the numeric post ID rather than
+            # retrying only the opaque /share/r/ link.
+            nested_url = parse_qs(urlparse(response.url).query).get("next", [None])[0]
+            if nested_url and is_facebook_url(nested_url):
+                candidates.append(nested_url)
         except requests.RequestException as error:
             print(f"Facebook public link resolution unavailable: {type(error).__name__}")
 
+        # If the short URL resolver is blocked, the redirect may still expose
+        # a canonical story link on the public mobile site.
         for candidate in list(candidates):
             parsed = urlparse(candidate)
             params = parse_qs(parsed.query)
