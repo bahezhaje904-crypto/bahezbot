@@ -948,8 +948,10 @@ def instagram_retry_options(url, kind="video", use_cookies=True):
         # separate video/audio formats cannot be merged on a hosted server.
         options["format"] = "best[ext=mp4]/best"
         options.pop("merge_output_format", None)
-    # Keep Instagram requests anonymous regardless of existing Railway secrets.
+    # Anonymous by default; authenticated fallback only with configured cookies.
     options.pop("cookiefile", None)
+    if use_cookies and INSTAGRAM_COOKIES_FILE and os.path.isfile(INSTAGRAM_COOKIES_FILE):
+        options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     return options
 
 
@@ -1593,7 +1595,11 @@ async def send_download(message, url, context=None, kind="video"):
                 return False
         if is_instagram_url(url):
             retry_errors = [error]
+            # Retry with an authorized Instagram session first, if available;
+            # then try the alternate anonymous client.
             for use_cookies in (True, False):
+                if use_cookies and not (INSTAGRAM_COOKIES_FILE and os.path.isfile(INSTAGRAM_COOKIES_FILE)):
+                    continue
                 try:
                     retry_before = {
                         os.path.join(DOWNLOAD_DIR, file_name)
@@ -1637,8 +1643,10 @@ async def send_download(message, url, context=None, kind="video"):
 
             final_error = retry_errors[-1]
             await report_download_error(context, message, url, final_error, kind)
-            if instagram_cookie_error(final_error):
-                await message.reply_text(instagram_cookie_message())
+            if is_instagram_url(url) and not (INSTAGRAM_COOKIES_FILE and os.path.isfile(INSTAGRAM_COOKIES_FILE)):
+                await message.reply_text("Instagram could not download this Reel anonymously. Age-restricted or login-only Reels require an authorized Instagram session configured privately by the bot owner.")
+            elif instagram_cookie_error(final_error):
+                await message.reply_text("Instagram rejected this Reel even with the configured session. Check that the session is current and permitted to view the Reel.")
             else:
                 await send_clean_error(message)
             return False
