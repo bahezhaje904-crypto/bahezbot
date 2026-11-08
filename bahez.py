@@ -917,13 +917,10 @@ def ydl_options(url, kind="video"):
             options["merge_output_format"] = "mp4"
     if is_snapchat_url(url) and SNAPCHAT_COOKIES_FILE and os.path.exists(SNAPCHAT_COOKIES_FILE):
         options["cookiefile"] = SNAPCHAT_COOKIES_FILE
-    elif is_instagram_url(url) and INSTAGRAM_COOKIES_FILE and os.path.exists(INSTAGRAM_COOKIES_FILE):
-        options["cookiefile"] = INSTAGRAM_COOKIES_FILE
     elif is_youtube_url(url) and COOKIES_FILE and os.path.exists(COOKIES_FILE):
         options["cookiefile"] = COOKIES_FILE
 
-    if is_instagram_url(url):
-        options["extractor_args"] = {"instagram": {"app_id": ["936619743392459"]}}
+    # Instagram uses the current yt-dlp extractor defaults anonymously first.
 
     if is_facebook_url(url):
         options["http_headers"] = {
@@ -944,14 +941,15 @@ def instagram_retry_options(url, kind="video", use_cookies=True):
     # returns metadata with no playable formats. Repeating web extraction with
     # a different format selector cannot recover formats absent from metadata.
     if use_cookies:
+        # Alternate app identifier is only a fallback for public media.
         options["extractor_args"] = {"instagram": {"app_id": ["124024574287414"]}}
     if kind == "video":
         # Instagram often exposes a ready-to-send combined MP4 even when its
         # separate video/audio formats cannot be merged on a hosted server.
         options["format"] = "best[ext=mp4]/best"
         options.pop("merge_output_format", None)
-    if not use_cookies:
-        options.pop("cookiefile", None)
+    # Keep Instagram requests anonymous regardless of existing Railway secrets.
+    options.pop("cookiefile", None)
     return options
 
 
